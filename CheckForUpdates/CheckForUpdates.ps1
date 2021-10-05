@@ -28,7 +28,6 @@ try {
 
     Set-Location $ENV:GITHUB_WORKSPACE
     $headers = @{             
-        "Authorization" = "token $token"
         "Accept"        = "application/vnd.github.baptiste-preview+json"
     }
     if ($templateUrl -ne "") {
