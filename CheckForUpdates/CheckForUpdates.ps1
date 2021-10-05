@@ -30,6 +30,7 @@ try {
     $headers = @{             
         "Accept"        = "application/vnd.github.baptiste-preview+json"
     }
+    Write-Host $templateUrl
     if ($templateUrl -ne "") {
         try {
             $templateUrl = $templateUrl -replace "https://www.github.com/","https://api.github.com/repos/" -replace "https://github.com/","https://api.github.com/repos/"
