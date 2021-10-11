@@ -3,9 +3,9 @@ Param(
 )
 
 $ErrorActionPreference = "stop"
-$ALGoFolder = ".github\AL-Go\"
-$ALGoSettingsFile = ".github\AL-Go\settings.json"
-$customerEnvironmentsFile = ".github\AL-Go\customerEnvironments.json"
+$ALGoFolder = ".AL-Go\"
+$ALGoSettingsFile = ".AL-Go\settings.json"
+$RepoSettingsFile = ".github\AL-Go-Settings.json"
 $runningLocal = $local.IsPresent
 
 $runAlPipelineOverrides = @(
@@ -274,13 +274,14 @@ function ReadSettings {
     
     # Read Settings file
     $settings = [ordered]@{
-        "type"                                   = "Per Tenant Extension"
+        "type"                                   = "PTE"
         "country"                                = "us"
         "artifact"                               = ""
         "companyName"                            = ""
         "repoVersion"                            = "1.0"
         "repoName"                               = $repoName
         "versioningStrategy"                     = 0
+        "runNumberOffset"                        = 0
         "appBuild"                               = 0
         "appRevision"                            = 0
         "keyVaultName"                           = ""
@@ -313,28 +314,26 @@ function ReadSettings {
         "templateUrl"                            = ""
         "templateBranch"                         = ""
     }
-    
-    "settings.json", "$workflowName.setting.json", "$userName.settings.json" | ForEach-Object {
-        if ($_ -ne ".settings.json") {
-            $settingsFile = Join-Path $ALGoFolder $_
-            $settingsPath = Join-Path $baseFolder $settingsFile
-            if (Test-Path $settingsPath) {
-                try {
-                    Write-Host "Reading $settingsFile"
-                    $settingsJson = Get-Content $settingsPath | ConvertFrom-Json
-        
-                    # check settingsJson.version and do modifications if needed
-        
-                    MergeCustomObjectIntoOrderedDictionary -dst $settings -src $settingsJson
-                }
-                catch {
-                    throw "Settings file $settingsFile, is wrongly formatted. Error is $($_.Exception.Message)."
-                }
+
+    $RepoSettingsFile, $ALGoSettingsFile, (Join-Path $ALGoFolder "$workflowName.setting.json"), (Join-Path $ALGoFolder "$userName.settings.json") | ForEach-Object {
+        $settingsFile = $_
+        $settingsPath = Join-Path $baseFolder $settingsFile
+        if (Test-Path $settingsPath) {
+            try {
+                Write-Host "Reading $settingsFile"
+                $settingsJson = Get-Content $settingsPath | ConvertFrom-Json
+       
+                # check settingsJson.version and do modifications if needed
+         
+                MergeCustomObjectIntoOrderedDictionary -dst $settings -src $settingsJson
+            }
+            catch {
+                throw "Settings file $settingsFile, is wrongly formatted. Error is $($_.Exception.Message)."
             }
         }
     }
 
-    # $settings | ConvertTo-Json | Out-Host
+    $settings | ConvertTo-Json | Out-Host
     $settings
 }
 
@@ -355,7 +354,7 @@ function AnalyzeRepo {
 
 
     Write-Host "Checking type"
-    if ($settings.type -eq "Per Tenant Extension") {
+    if ($settings.type -eq "PTE") {
         if (!$settings.Contains('enablePerTenantExtensionCop')) {
             $settings.Add('enablePerTenantExtensionCop', $true)
         }
@@ -363,7 +362,7 @@ function AnalyzeRepo {
             $settings.Add('enableAppSourceCop', $false)
         }
     }
-    elseif ($settings.type -eq "AppSource App") {
+    elseif ($settings.type -eq "AppSource App" ) {
         if (!$settings.Contains('enablePerTenantExtensionCop')) {
             $settings.Add('enablePerTenantExtensionCop', $false)
         }
@@ -656,21 +655,30 @@ function GetReleases {
 function DownloadRelease {
     Param(
         [string] $token,
+        [string] $projects = "*",
         [string] $api_url = $ENV:GITHUB_API_URL,
         [string] $repository = $ENV:GITHUB_REPOSITORY,
+        [string] $path,
         $release
     )
 
+    if ($projects -eq "") { $projects = "*" }
     Write-Host "Downloading release $($release.Name)"
     $headers = @{ 
         "Authorization" = "token $token"
         "Accept"        = "application/octet-stream"
     }
-    $tempName = Join-Path $env:TEMP "$([Guid]::NewGuid().ToString()).zip"
-    $asset = $release.assets | Where-Object { $_.name -like "*-Apps-*.zip" }
-    Write-Host "$api_url/repos/$repository/releases/assets/$($asset.id)"
-    Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri "$api_url/repos/$repository/releases/assets/$($asset.id)" -OutFile $tempName
-    $tempName
+    $projects.Split(',') | ForEach-Object {
+        $project = $_
+        Write-Host "project '$project'"
+        $release.assets | % { Write-Host $_.name }
+        
+        $release.assets | Where-Object { $_.name -like "$project-Apps-*.zip" } | ForEach-Object {
+            Write-Host "$api_url/repos/$repository/releases/assets/$($_.id)"
+            $filename = Join-Path $path $_.name
+            Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri "$api_url/repos/$repository/releases/assets/$($_.id)" -OutFile $filename
+        }
+    }
 }    
 
 function GetArtifacts {
@@ -706,6 +714,7 @@ function GetArtifact {
 function DownloadArtifact {
     Param(
         [string] $token,
+        [string] $path,
         $artifact
     )
 
@@ -714,9 +723,7 @@ function DownloadArtifact {
         "Authorization" = "token $token"
         "Accept"        = "application/vnd.github.v3+json"
     }
-    $tempName = Join-Path $env:TEMP "$([Guid]::NewGuid().ToString()).zip"
-    Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri $artifact.archive_download_url -OutFile $tempName
-    $tempName
+    Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri $artifact.archive_download_url -OutFile (Join-Path $path "$($artifact.Name).zip")
 }    
 function Select-Value {
     Param(
@@ -985,7 +992,7 @@ function CreateDevEnv {
                 "insiderSasToken" = $insiderSasToken
                 "licenseFileUrl" = $LicenseFileUrl
             }
-            if ($settings.type -eq "AppSource App") {
+            if ($settings.type -eq "AppSource App" ) {
                 if ($licenseFileUrl -eq "") {
                     OutputError -message "When building an AppSource App, you need to create a secret called LicenseFileUrl, containing a secure URL to your license file with permission to the objects used in the app."
                     exit
@@ -1158,4 +1165,11 @@ function ConvertTo-HashTable() {
         $object.PSObject.Properties | Foreach { $ht[$_.Name] = $_.Value }
     }
     $ht
+}
+
+function WriteDebugString([string] $str) {
+    $str.ToCharArray() | ForEach-Object {
+        Write-Host -NoNewline "$_ "
+    }
+    Write-Host
 }

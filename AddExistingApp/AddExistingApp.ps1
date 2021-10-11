@@ -92,10 +92,10 @@ try {
         $ttype = ""
         $ranges | Select-Object -First 1 | ForEach-Object {
             if ($_.from -lt 100000 -and $_.to -lt 100000) {
-                $ttype = "Per Tenant Extension"
+                $ttype = "PTE"
             }
             else {
-                $ttype = "AppSource App"
+                $ttype = "AppSource App" 
             }
         }
         
@@ -149,7 +149,7 @@ try {
         }
 
         $appFolders | ForEach-Object {
-            # Modify .github\AL-Go\settings.json
+            # Modify .AL-Go\settings.json
             try {
                 $settingsJsonFile = Join-Path $baseFolder $ALGoSettingsFile
                 $SettingsJson = Get-Content $settingsJsonFile | ConvertFrom-Json

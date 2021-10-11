@@ -1,6 +1,7 @@
 Param(
     [string] $actor,
     [string] $token,
+    [string] $project = "",
     [string] $settingsJson = '{"AppBuild":"";"AppRevision":""}',
     [string] $secretsJson = '{"insiderSasToken":"";"licenseFileUrl":"";"CodeSignCertificateUrl":"";"CodeSignCertificatePassword":"";"KeyVaultCertificateUrl":"";"KeyVaultCertificatePassword":"";"KeyVaultClientId":""}',
     [string] $licenseFileUrl = "",
@@ -25,7 +26,8 @@ try {
     $BcContainerHelperPath = DownloadAndImportBcContainerHelper
 
     $environment = 'GitHubActions'
-    $baseFolder = $ENV:GITHUB_WORKSPACE
+    if ($project  -eq ".") { $project = "" }
+    $baseFolder = Join-Path $ENV:GITHUB_WORKSPACE $project
     $workflowName = $env:GITHUB_WORKFLOW
     $containerName = "bc$env:GITHUB_RUN_ID"
 
@@ -55,7 +57,7 @@ try {
     $bcContainerHelperConfig.TelemetryConnectionString = "InstrumentationKey=84bd9223-67d4-4378-8590-9e4a46023be2;IngestionEndpoint=https://westeurope-1.in.applicationinsights.azure.com/"
     $bcContainerHelperConfig.UseExtendedTelemetry = $true
 
-    if ($settings.type -eq "AppSource App") {
+    if ($settings.type -eq "AppSource App" ) {
         if ($licenseFileUrl -eq "") {
             OutputError -message "When building an AppSource App, you need to create a secret called LicenseFileUrl, containing a secure URL to your license file with permission to the objects used in the app."
             exit
@@ -94,16 +96,18 @@ try {
     }
 
     try {
-        $appsVersion = [Version]"$($repo.repoVersion).$appBuild.$appRevision"
         $previousApps = @()
         $releasesJson = GetReleases -token $token -api_url $ENV:GITHUB_API_URL -repository $ENV:GITHUB_REPOSITORY
-        $latestRelease = $releasesJson | Where-Object { ($appsVersion -gt [Version]$_.tag_name) -and (-not ($_.prerelease -or $_.draft)) } | Select-Object -First 1
+        $latestRelease = $releasesJson | Where-Object { -not ($_.prerelease -or $_.draft) } | Select-Object -First 1
         if ($latestRelease) {
             Write-Host "Using $($latestRelease.name) as previous release"
-            $previousApps += @(DownloadRelease -token $token -api_url $ENV:GITHUB_API_URL -repository $ENV:GITHUB_REPOSITORY -release $latestRelease)
+            $artifactsFolder = Join-Path $baseFolder "artifacts"
+            New-Item $artifactsFolder -ItemType Directory | Out-Null
+            DownloadRelease -token $token -projects $project -api_url $ENV:GITHUB_API_URL -repository $ENV:GITHUB_REPOSITORY -release $latestRelease -path $artifactsFolder
+            $previousApps += @((Get-ChildItem -Path $artifactsFolder).FullName)
         }
         else {
-            OutputWarning -message "No previous release to $appsVersion found"
+            OutputWarning -message "No previous release found"
         }
     }
     catch {
