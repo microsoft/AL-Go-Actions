@@ -2,7 +2,13 @@ Param(
     [switch] $local
 )
 
+if (!$local) {
+    Import-Module (Join-Path $PSScriptRoot '.\Github-Helper.psm1')
+}
+
 $ErrorActionPreference = "stop"
+Set-StrictMode -Version 2.0
+
 $ALGoFolder = ".AL-Go\"
 $ALGoSettingsFile = ".AL-Go\settings.json"
 $RepoSettingsFile = ".github\AL-Go-Settings.json"
@@ -62,6 +68,19 @@ function invoke-hub {
     Write-Host -ForegroundColor Yellow "hub $command $remaining"
     hub $command $remaining
     if ($lastexitcode) { throw "hub $command error" }
+}
+
+function ConvertTo-HashTable {
+    [CmdletBinding()]
+    Param(
+        [parameter(ValueFromPipeline)]
+        [PSCustomObject] $object
+    )
+    $ht = @{}
+    if ($object) {
+        $object.PSObject.Properties | Foreach { $ht[$_.Name] = $_.Value }
+    }
+    $ht
 }
 
 function OutputError {
@@ -301,18 +320,21 @@ function ReadSettings {
         "testFolders"                            = @()
         "installApps"                            = @()
         "installTestApps"                        = @()
-        "applicationDependency"                  = "17.0.0.0"
+        "applicationDependency"                  = "19.0.0.0"
         "installTestRunner"                      = $false
         "installTestFramework"                   = $false
         "installTestLibraries"                   = $false
         "installPerformanceToolkit"              = $false
         "enableCodeCop"                          = $false
         "enableUICop"                            = $false
+        "doNotBuildTests"                        = $false
         "doNotRunTests"                          = $false
         "appSourceCopMandatoryAffixes"           = @()
-        "memoryLimit"                            = "6G"
+        "memoryLimit"                            = ""
         "templateUrl"                            = ""
         "templateBranch"                         = ""
+        "appDependencyProbingPaths"              = @()
+        "githubRunner"                           = "windows-latest"
     }
 
     $RepoSettingsFile, $ALGoSettingsFile, (Join-Path $ALGoFolder "$workflowName.setting.json"), (Join-Path $ALGoFolder "$userName.settings.json") | ForEach-Object {
@@ -333,7 +355,6 @@ function ReadSettings {
         }
     }
 
-    $settings | ConvertTo-Json | Out-Host
     $settings
 }
 
@@ -629,6 +650,9 @@ function CommitFromNewFolder {
 
     invoke-git add *
     invoke-git commit -m "$commitMessage"
+    if ($commitMessage.Length -gt 250) {
+        $commitMessage = "$($commitMessage.Substring(0,250))...)"
+    }
     if ($branch) {
         invoke-git push -u $serverUrl $branch
         invoke-hub pull-request -h $branch -m "$commitMessage"
@@ -638,94 +662,6 @@ function CommitFromNewFolder {
     }
 }
 
-function GetReleases {
-    Param(
-        [string] $token,
-        [string] $api_url = $ENV:GITHUB_API_URL,
-        [string] $repository = $ENV:GITHUB_REPOSITORY
-    )
-
-    Write-Host "Analyzing releases"
-    $headers = @{ 
-        "Authorization" = "token $token"
-        "Accept"        = "application/json"
-    }
-    Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri "$api_url/repos/$repository/releases" | ConvertFrom-Json
-}
-
-function DownloadRelease {
-    Param(
-        [string] $token,
-        [string] $projects = "*",
-        [string] $api_url = $ENV:GITHUB_API_URL,
-        [string] $repository = $ENV:GITHUB_REPOSITORY,
-        [string] $path,
-        $release
-    )
-
-    if ($projects -eq "") { $projects = "*" }
-    Write-Host "Downloading release $($release.Name)"
-    $headers = @{ 
-        "Authorization" = "token $token"
-        "Accept"        = "application/octet-stream"
-    }
-    $projects.Split(',') | ForEach-Object {
-        $project = $_
-        Write-Host "project '$project'"
-        $release.assets | % { Write-Host $_.name }
-        
-        $release.assets | Where-Object { $_.name -like "$project-Apps-*.zip" } | ForEach-Object {
-            Write-Host "$api_url/repos/$repository/releases/assets/$($_.id)"
-            $filename = Join-Path $path $_.name
-            Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri "$api_url/repos/$repository/releases/assets/$($_.id)" -OutFile $filename
-        }
-    }
-}    
-
-function GetArtifacts {
-    Param(
-        [string] $token,
-        [string] $api_url = $ENV:GITHUB_API_URL,
-        [string] $repository = $ENV:GITHUB_REPOSITORY
-    )
-
-    Write-Host "Analyzing artifacts"
-    $headers = @{ 
-        "Authorization" = "token $token"
-        "Accept"        = "application/json"
-    }
-    $artifacts = Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri "$api_url/repos/$repository/actions/artifacts" | ConvertFrom-Json
-    $artifacts.artifacts | Where-Object { $_.name -like "*-Apps-*" }
-}
-
-function GetArtifact {
-    Param(
-        [string] $token,
-        $artifactsUrl
-    )
-    Write-Host "Analyzing artifact ($artifactsUrl)"
-    $headers = @{ 
-        "Authorization" = "token $token"
-        "Accept"        = "application/json"
-    }
-    $artifacts = Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri $artifactsUrl | ConvertFrom-Json
-    $artifacts.artifacts | Where-Object { $_.name -like "*-Apps-*" }
-}
-
-function DownloadArtifact {
-    Param(
-        [string] $token,
-        [string] $path,
-        $artifact
-    )
-
-    Write-Host "Downloading artifact $($artifact.Name)"
-    $headers = @{ 
-        "Authorization" = "token $token"
-        "Accept"        = "application/vnd.github.v3+json"
-    }
-    Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri $artifact.archive_download_url -OutFile (Join-Path $path "$($artifact.Name).zip")
-}    
 function Select-Value {
     Param(
         [Parameter(Mandatory=$false)]
@@ -874,6 +810,10 @@ function Enter-Value {
     $answer
 }
 
+function GetContainerName([string] $project) {
+    "bc$($project -replace "\W")$env:GITHUB_RUN_ID"
+}
+
 function CreateDevEnv {
     Param(
         [Parameter(Mandatory=$true)]
@@ -900,7 +840,9 @@ function CreateDevEnv {
         [Parameter(Mandatory=$true, ParameterSetName='local')]
         [pscredential] $credential,
         [Parameter(ParameterSetName='local')]
-        [string] $containerName = ""
+        [string] $containerName = "",
+        [string] $insiderSasToken = "",
+        [string] $LicenseFileUrl = ""
     )
 
     if ($PSCmdlet.ParameterSetName -ne $kind) {
@@ -925,9 +867,6 @@ function CreateDevEnv {
         if ($caller -eq "local") { $params += @{ "userName" = $userName } }
         $settings = ReadSettings @params
     
-        $insiderSasToken = ""
-        $LicenseFileUrl = ""
-
         if ($caller -eq "GitHubActions") {
             if ($kind -ne "cloud") {
                 OutputError -message "Unexpected. kind=$kind, caller=$caller"
@@ -1051,11 +990,16 @@ function CreateDevEnv {
                 "artifact" = $repo.artifact.replace('{INSIDERSASTOKEN}',$insiderSasToken)
                 "auth" = $auth
                 "credential" = $credential
-                "updateLaunchJson" = "Local Sandbox"
             }
             if ($containerName) {
                 $runAlPipelineParams += @{
+                    "updateLaunchJson" = "Local Sandbox ($containerName)"
                     "containerName" = $containerName
+                }
+            }
+            else {
+                $runAlPipelineParams += @{
+                    "updateLaunchJson" = "Local Sandbox"
                 }
             }
         }
@@ -1144,7 +1088,7 @@ function CreateDevEnv {
             -AppSourceCopSupportedCountries @() `
             -doNotRunTests `
             -useDevEndpoint `
-            -keepContainer `
+            -keepContainer
     }
     finally {
         # Cleanup
@@ -1167,11 +1111,4 @@ function ConvertTo-HashTable() {
         $object.PSObject.Properties | Foreach { $ht[$_.Name] = $_.Value }
     }
     $ht
-}
-
-function WriteDebugString([string] $str) {
-    $str.ToCharArray() | ForEach-Object {
-        Write-Host -NoNewline "$_ "
-    }
-    Write-Host
 }
