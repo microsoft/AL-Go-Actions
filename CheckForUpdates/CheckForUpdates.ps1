@@ -3,8 +3,8 @@ Param(
     [string] $actor,
     [Parameter(HelpMessage = "The GitHub token running the action", Mandatory = $false)]
     [string] $token,
-    [Parameter(HelpMessage = "Settings from template repository in compressed Json format", Mandatory = $false)]
-    [string] $settingsJson = '{"templateUrl": "", "templateBranch": ""}',
+    [Parameter(HelpMessage = "Specifies the parent telemetry scope for the Telemetry signal", Mandatory = $false)]
+    [string] $parentTelemetryScopeJson = '{}',
     [Parameter(HelpMessage = "URL of the template repository (default is the template repository used to create the repository)", Mandatory = $false)]
     [string] $templateUrl = "",
     [Parameter(HelpMessage = "Branch in template repository to use for the update (default is the default branch)", Mandatory = $false)]
@@ -17,25 +17,47 @@ Param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
+$telemetryScope = $null
+
+# IMPORTANT: No code that can fail should be outside the try/catch
 
 try {
-    . (Join-Path $PSScriptRoot "..\AL-Go-Helper.ps1")
-
+    . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
     $baseFolder = $ENV:GITHUB_WORKSPACE
+    $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $baseFolder
+    import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
+    $telemetryScope = CreateScope -eventId 'DO0071' -parentTelemetryScopeJson $parentTelemetryScopeJson
 
     if ($update -and -not $token) {
         OutputError "You need to add a secret called GHTOKENWORKFLOW containing a personal access token with permissions to modify Workflows. This is done by opening https://github.com/settings/tokens, Generate a new token and check the workflow scope."
         exit
     }
 
-    $updateSettingsTemplate = $true
-    $settings = $settingsJson | ConvertFrom-Json | ConvertTo-HashTable
-
-    if ($templateUrl -eq "" -and $templateBranch -eq "") {
-        $templateUrl = $settings.templateUrl
-        $templateBranch = $settings.templateBranch
-        $updateSettingsTemplate = $false
+    # Support old calling convention
+    if (-not $templateUrl.Contains('@')) {
+        if ($templateBranch) {
+            $templateUrl += "@$templateBranch"
+        }
+        else {
+            $templateUrl += "@main"
+        }
     }
+
+    $RepoSettingsFile = ".github\AL-Go-Settings.json"
+    if (Test-Path $RepoSettingsFile) {
+        $repoSettings = Get-Content $repoSettingsFile -Encoding UTF8 | ConvertFrom-Json | ConvertTo-HashTable
+    }
+    else {
+        $repoSettings = @{}
+    }
+
+    $updateSettings = $true
+    if ($repoSettings.ContainsKey("TemplateUrl") -and $repoSettings.TemplateUrl -eq $templateUrl) {
+        $updateSettings = $false
+    }
+
+    $templateBranch = $templateUrl.Split('@')[1]
+    $templateUrl = $templateUrl.Split('@')[0]
 
     Set-Location $baseFolder
     $headers = @{
@@ -60,10 +82,6 @@ try {
             exit
         }
         $templateInfo = $repoInfo.template_repository
-    }
-
-    if ($updateSettingsTemplate -and $templateUrl -eq $settings.templateUrl -and $templateBranch -eq $settings.templateBranch) {
-        $updateSettingsTemplate = $false
     }
 
     $templateUrl = $templateInfo.html_url
@@ -137,7 +155,7 @@ try {
         }
     }
     else {
-        if ($updateSettingsTemplate -or ($updateFiles) -or ($removeFiles)) {
+        if ($updateSettings -or ($updateFiles) -or ($removeFiles)) {
             try {
                 # URL for git commands
                 $tempRepo = Join-Path $env:TEMP ([Guid]::NewGuid().ToString())
@@ -176,8 +194,7 @@ try {
                 else {
                     $repoSettings = @{}
                 }
-                $repoSettings.templateUrl = $templateUrl
-                $repoSettings.templateBranch = $templateBranch
+                $repoSettings.templateUrl = "$templateUrl@$templateBranch"
                 $repoSettings | ConvertTo-Json -Depth 99 | Set-Content $repoSettingsFile -Encoding UTF8
 
                 $updateFiles | ForEach-Object {
@@ -222,7 +239,13 @@ try {
             OutputWarning "No updated AL-Go System Files are available"
         }
     }
+
+    TrackTrace -telemetryScope $telemetryScope
 }
 catch {
     OutputError -message $_.Exception.Message
+    TrackException -telemetryScope $telemetryScope -errorRecord $_
+}
+finally {
+    CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
 }
