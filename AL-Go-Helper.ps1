@@ -62,15 +62,17 @@ function invoke-git {
     if ($lastexitcode) { throw "git $command error" }
 }
 
-function invoke-hub {
+function invoke-gh {
     Param(
         [parameter(mandatory = $true, position = 0)][string] $command,
         [parameter(mandatory = $false, position = 1, ValueFromRemainingArguments = $true)] $remaining
     )
 
-    Write-Host -ForegroundColor Yellow "hub $command $remaining"
-    hub $command $remaining
-    if ($lastexitcode) { throw "hub $command error" }
+    Write-Host -ForegroundColor Yellow "gh $command $remaining"
+    $ErrorActionPreference = "SilentlyContinue"
+    gh $command $remaining
+    $ErrorActionPreference = "Stop"
+    if ($lastexitcode) { throw "gh $command error" }
 }
 
 function ConvertTo-HashTable {
@@ -572,7 +574,14 @@ function AnalyzeRepo {
                             else {
                                 $id = $_.Id
                             }
-                            $dependencies."$folderName" += @( [ordered]@{ "id" = $id; "version" = $_.version } )
+                            if ($id -eq $applicationAppId) {
+                                if ([Version]$_.Version -gt [Version]$settings.applicationDependency) {
+                                    $settings.applicationDependency = $appDep
+                                }
+                            }
+                            else {
+                                $dependencies."$folderName" += @( [ordered]@{ "id" = $id; "version" = $_.version } )
+                            }
                         }
                     }
                     if ($appJson.PSObject.Properties.Name -eq 'Application') {
@@ -589,12 +598,15 @@ function AnalyzeRepo {
         }
     }
 
+    if ([Version]$settings.applicationDependency -gt [Version]$version) {
+        throw "Application dependency is set to $($settings.applicationDependency), which isn't compatible with the artifact version $version"
+    }
+
     # unpack all dependencies and update app- and test dependencies from dependency apps
     $settings.appDependencies + $settings.testDependencies | ForEach-Object {
         $dep = $_
         if ($dep -is [string]) {
-            
-
+            # TODO: handle pre-settings
         }
     }
 
@@ -705,13 +717,13 @@ function CommitFromNewFolder {
     )
 
     invoke-git add *
-    invoke-git commit -m "$commitMessage"
     if ($commitMessage.Length -gt 250) {
         $commitMessage = "$($commitMessage.Substring(0,250))...)"
     }
+    invoke-git commit -m "'$commitMessage'"
     if ($branch) {
         invoke-git push -u $serverUrl $branch
-        invoke-hub pull-request -h $branch -m "$commitMessage"
+        invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY
     }
     else {
         invoke-git push $serverUrl
