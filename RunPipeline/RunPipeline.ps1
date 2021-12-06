@@ -26,6 +26,12 @@ try {
     
     $telemetryScope = CreateScope -eventId 'DO0080' -parentTelemetryScopeJson $parentTelemetryScopeJson
 
+    # Pull docker image in the background
+    $genericImageName = Get-BestGenericImageName
+    Start-Job -ScriptBlock {
+        docker pull --quiet $genericImageName
+    } -ArgumentList $genericImageName | Out-Null
+
     $runAlPipelineParams = @{}
     $environment = 'GitHubActions'
     if ($project  -eq ".") { $project = "" }
@@ -116,9 +122,12 @@ try {
         exit
     }
 
-    $additionalCountries = @()
-    
+    $additionalCountries = $repo.additionalCountries
+
     $imageName = ""
+    if ($repo.gitHubRunner -ne "windows-latest") {
+        $imageName = $repo.cacheImageName
+    }
     $authContext = $null
     $environmentName = ""
     $CreateRuntimePackages = $false
@@ -183,12 +192,12 @@ try {
         -enableAppSourceCop:$repo.enableAppSourceCop `
         -enablePerTenantExtensionCop:$repo.enablePerTenantExtensionCop `
         -enableUICop:$repo.enableUICop `
+        -customCodeCops:$repo.customCodeCops `
         -azureDevOps:($environment -eq 'AzureDevOps') `
         -gitLab:($environment -eq 'GitLab') `
         -gitHubActions:($environment -eq 'GitHubActions') `
         -failOn 'error' `
         -AppSourceCopMandatoryAffixes $repo.appSourceCopMandatoryAffixes `
-        -AppSourceCopSupportedCountries @() `
         -additionalCountries $additionalCountries `
         -buildArtifactFolder $buildArtifactFolder `
         -CreateRuntimePackages:$CreateRuntimePackages `
