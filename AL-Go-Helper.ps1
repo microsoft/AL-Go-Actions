@@ -609,7 +609,7 @@ function AnalyzeRepo {
         }
     }
 
-    if ($artifact) {
+    if ($settings.artifact) {
         if ([Version]$settings.applicationDependency -gt [Version]$version) {
             throw "Application dependency is set to $($settings.applicationDependency), which isn't compatible with the artifact version $version"
         }
