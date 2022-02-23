@@ -609,8 +609,10 @@ function AnalyzeRepo {
         }
     }
 
-    if ([Version]$settings.applicationDependency -gt [Version]$version) {
-        throw "Application dependency is set to $($settings.applicationDependency), which isn't compatible with the artifact version $version"
+    if ($artifact) {
+        if ([Version]$settings.applicationDependency -gt [Version]$version) {
+            throw "Application dependency is set to $($settings.applicationDependency), which isn't compatible with the artifact version $version"
+        }
     }
 
     # unpack all dependencies and update app- and test dependencies from dependency apps
