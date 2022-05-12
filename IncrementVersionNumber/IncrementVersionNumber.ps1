@@ -16,6 +16,7 @@ Param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 $telemetryScope = $null
+$bcContainerHelperPath = $null
 
 # IMPORTANT: No code that can fail should be outside the try/catch
 
@@ -93,7 +94,7 @@ try {
             if (Test-Path $appJsonFile) {
                 try {
                     $appJson = Get-Content $appJsonFile -Encoding UTF8 | ConvertFrom-Json
-                    $oldVersion = $appJson.Version
+                    $oldVersion = [System.Version]$appJson.Version
                     if ($useRepoVersion) {
                         $appVersion = $repoVersion
                     }
