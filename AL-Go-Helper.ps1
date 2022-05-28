@@ -376,6 +376,7 @@ function ReadSettings {
         "insiderSasTokenSecretName"              = "InsiderSasToken"
         "ghTokenWorkflowSecretName"              = "GhTokenWorkflow"
         "adminCenterApiCredentialsSecretName"    = "AdminCenterApiCredentials"
+        "applicationInsightsConnectionStringSecretName" = "ApplicationInsightsConnectionString"
         "keyVaultCertificateUrlSecretName"       = ""
         "keyVaultCertificatePasswordSecretName"  = ""
         "keyVaultClientIdSecretName"             = ""
@@ -1000,6 +1001,21 @@ function Enter-Value {
     $answer
 }
 
+function OptionallyConvertFromBase64 {
+    Param(
+        [string] $value
+    )
+
+    if ($value.StartsWith('::') -and $value.EndsWith('::')) {
+        if ($value.Length -eq 4) {
+            ""
+        }
+        else {
+            [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($value.Substring(2, $value.Length-4)))
+        }
+    }
+}
+
 function GetContainerName([string] $project) {
     "bc$($project -replace "\W")$env:GITHUB_RUN_ID"
 }
@@ -1084,6 +1100,15 @@ function CreateDevEnv {
                     if ($insiderSasTokenSecret) { $insiderSasToken = $insiderSasTokenSecret.SecretValue | Get-PlainText }
 
                     # do not add codesign cert.
+
+                    if ($settings.applicationInsightsConnectionStringSecretName) {
+                        $applicationInsightsConnectionStringSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.applicationInsightsConnectionStringSecretName
+                        if ($applicationInsightsConnectionStringSecret) {
+                            $runAlPipelineParams += @{ 
+                                "applicationInsightsConnectionString" = $applicationInsightsConnectionStringSecret.SecretValue | Get-PlainText
+                            }
+                        }
+                    }
                     
                     if ($settings.KeyVaultCertificateUrlSecretName) {
                         $KeyVaultCertificateUrlSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.KeyVaultCertificateUrlSecretName
