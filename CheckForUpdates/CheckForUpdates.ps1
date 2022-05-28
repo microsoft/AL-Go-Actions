@@ -18,6 +18,7 @@ Param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 $telemetryScope = $null
+$bcContainerHelperPath = $null
 
 # IMPORTANT: No code that can fail should be outside the try/catch
 
@@ -106,7 +107,10 @@ try {
     Expand-7zipArchive -Path "$tempName.zip" -DestinationPath $tempName
     Remove-Item -Path "$tempName.zip"
     
-    $checkfiles = @(@{ "dstPath" = ".github\workflows"; "srcPath" = ".github\workflows"; "pattern" = "*"; "type" = "workflow" })
+    $checkfiles = @(
+        @{ "dstPath" = ".github\workflows"; "srcPath" = ".github\workflows"; "pattern" = "*"; "type" = "workflow" },
+        @{ "dstPath" = ".github"; "srcPath" = ".github"; "pattern" = "*.copy.md"; "type" = "releasenotes" }
+    )
     if (Test-Path (Join-Path $baseFolder ".AL-Go")) {
         $checkfiles += @(@{ "dstPath" = ".AL-Go"; "srcPath" = ".AL-Go"; "pattern" = "*.ps1"; "type" = "script" })
     }
@@ -140,6 +144,19 @@ try {
                 $srcPattern = "on:`r`n  workflow_dispatch:`r`n"
                 $replacePattern = "on:`r`n  schedule:`r`n  - cron: '$($repoSettings."$workflowScheduleKey")'`r`n  workflow_dispatch:`r`n"
                 $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
+            }
+            
+            if ($baseName -ne "UpdateGitHubGoSystemFiles") {
+                if ($repoSettings.ContainsKey("runs-on")) {
+                    $srcPattern = "runs-on: [ windows-latest ]`r`n"
+                    $replacePattern = "runs-on: [ $($repoSettings."runs-on") ]`r`n"
+                    $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
+                    if (!($repoSettings.ContainsKey("gitHubRunner"))) {
+                        $srcPattern = "runs-on: `${{ fromJson(needs.Initialization.outputs.githubRunner) }}`r`n"
+                        $replacePattern = "runs-on: [ $($repoSettings."runs-on") ]`r`n"
+                        $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
+                    }
+                }
             }
                 
             $dstFile = Join-Path $dstFolder $fileName
@@ -219,13 +236,36 @@ try {
                 }
                 $repoSettings | ConvertTo-Json -Depth 99 | Set-Content $repoSettingsFile -Encoding UTF8
 
+                $releaseNotes = ""
                 $updateFiles | ForEach-Object {
                     $path = [System.IO.Path]::GetDirectoryName($_.DstFile)
                     if (-not (Test-Path -path $path -PathType Container)) {
                         New-Item -Path $path -ItemType Directory | Out-Null
                     }
+                    if (([System.IO.Path]::GetFileName($_.DstFile) -eq "RELEASENOTES.copy.md") -and (Test-Path $_.DstFile)) {
+                        $oldReleaseNotes = (Get-Content -Path $_.DstFile -Encoding UTF8 -Raw).Replace("`r", "").TrimEnd("`n").Replace("`n", "`r`n")
+                        while ($oldReleaseNotes) {
+                            $releaseNotes = $_.Content
+                            if ($releaseNotes.indexOf($oldReleaseNotes) -gt 0) {
+                                $releaseNotes = $releaseNotes.SubString(0, $releaseNotes.indexOf($oldReleaseNotes))
+                                $oldReleaseNotes = ""
+                            }
+                            else {
+                                $idx = $oldReleaseNotes.IndexOf("`r`n## ")
+                                if ($idx -gt 0) {
+                                    $oldReleaseNotes = $oldReleaseNotes.Substring($idx)
+                                }
+                                else {
+                                    $oldReleaseNotes = ""
+                                }
+                            }
+                        }
+                    }
                     Write-Host "Update $($_.DstFile)"
                     Set-Content -Path $_.DstFile -Encoding UTF8 -Value $_.Content
+                }
+                if ($releaseNotes -eq "") {
+                    $releaseNotes = "No release notes available!"
                 }
                 $removeFiles | ForEach-Object {
                     Write-Host "Remove $_"
@@ -233,6 +273,9 @@ try {
                 }
 
                 invoke-git add *
+
+                Write-Host "ReleaseNotes:"
+                Write-Host $releaseNotes
 
                 $status = invoke-git status --porcelain=v1
                 if ($status) {
@@ -245,7 +288,7 @@ try {
                     }
                     else {
                         invoke-git push -u $url $branch
-                        invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY
+                        invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY --body "$releaseNotes"
                     }
                 }
                 else {

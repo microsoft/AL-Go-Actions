@@ -10,12 +10,13 @@ Param(
     [Parameter(HelpMessage = "Settings from repository in compressed Json format", Mandatory = $false)]
     [string] $settingsJson = '{"AppBuild":"", "AppRevision":""}',
     [Parameter(HelpMessage = "Secrets from repository in compressed Json format", Mandatory = $false)]
-    [string] $secretsJson = '{"insiderSasToken":"","licenseFileUrl":"","CodeSignCertificateUrl":"","CodeSignCertificatePassword":"","KeyVaultCertificateUrl":"","KeyVaultCertificatePassword":"","KeyVaultClientId":"","StorageContext":""}'
+    [string] $secretsJson = '{"insiderSasToken":"","licenseFileUrl":"","CodeSignCertificateUrl":"","CodeSignCertificatePassword":"","KeyVaultCertificateUrl":"","KeyVaultCertificatePassword":"","KeyVaultClientId":"","StorageContext":"","ApplicationInsightsConnectionString":""}'
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 $telemetryScope = $null
+$bcContainerHelperPath = $null
 
 # IMPORTANT: No code that can fail should be outside the try/catch
 
@@ -33,7 +34,6 @@ try {
     } -ArgumentList $genericImageName | Out-Null
 
     $runAlPipelineParams = @{}
-    $environment = 'GitHubActions'
     if ($project  -eq ".") { $project = "" }
     $baseFolder = Join-Path $ENV:GITHUB_WORKSPACE $project
     $sharedFolder = ""
@@ -48,7 +48,7 @@ try {
     $secrets = $secretsJson | ConvertFrom-Json | ConvertTo-HashTable
     $appBuild = $settings.appBuild
     $appRevision = $settings.appRevision
-    'licenseFileUrl','insiderSasToken','CodeSignCertificateUrl','CodeSignCertificatePassword','KeyVaultCertificateUrl','KeyVaultCertificatePassword','KeyVaultClientId','StorageContext' | ForEach-Object {
+    'licenseFileUrl','insiderSasToken','CodeSignCertificateUrl','CodeSignCertificatePassword','KeyVaultCertificateUrl','KeyVaultCertificatePassword','KeyVaultClientId','StorageContext','ApplicationInsightsConnectionString' | ForEach-Object {
         if ($secrets.ContainsKey($_)) {
             $value = $secrets."$_"
         }
@@ -116,8 +116,6 @@ try {
     $artifact = $repo.artifact
     $installApps = $repo.installApps
     $installTestApps = $repo.installTestApps
-    $doNotBuildTests = $repo.doNotBuildTests
-    $doNotRunTests = $repo.doNotRunTests
 
     if ($repo.appDependencyProbingPaths) {
         Write-Host "Downloading dependencies ..."
@@ -133,12 +131,18 @@ try {
 
     # Check if insidersastoken is used (and defined)
 
-    if ($CodeSignCertificateUrl -and $CodeSignCertificatePassword) {
+    if (!$repo.doNotSignApps -and $CodeSignCertificateUrl -and $CodeSignCertificatePassword) {
         $runAlPipelineParams += @{ 
             "CodeSignCertPfxFile" = $codeSignCertificateUrl
             "CodeSignCertPfxPassword" = ConvertTo-SecureString -string $codeSignCertificatePassword -AsPlainText -Force
         }
     }
+    if ($applicationInsightsConnectionString) {
+        $runAlPipelineParams += @{ 
+            "applicationInsightsConnectionString" = $applicationInsightsConnectionString
+        }
+    }
+
     if ($KeyVaultCertificateUrl -and $KeyVaultCertificatePassword -and $KeyVaultClientId) {
         $runAlPipelineParams += @{ 
             "KeyVaultCertPfxFile" = $KeyVaultCertificateUrl
@@ -229,6 +233,21 @@ try {
         }
     }
     
+    "doNotBuildTests",
+    "doNotRunTests",
+    "doNotRunBcptTests",
+    "doNotPublishApps",
+    "installTestRunner",
+    "installTestFramework",
+    "installTestLibraries",
+    "installPerformanceToolkit",
+    "enableCodeCop",
+    "enableAppSourceCop",
+    "enablePerTenantExtensionCop",
+    "enableUICop" | ForEach-Object {
+        if ($repo."$_") { $runAlPipelineParams += @{ "$_" = $true } }
+    }
+
     Write-Host "Invoke Run-AlPipeline"
     Run-AlPipeline @runAlPipelineParams `
         -pipelinename $workflowName `
@@ -250,31 +269,22 @@ try {
         -previousApps $previousApps `
         -appFolders $repo.appFolders `
         -testFolders $repo.testFolders `
-        -doNotBuildTests:$doNotBuildTests `
-        -doNotRunTests:$doNotRunTests `
+        -bcptTestFolders $repo.bcptTestFolders `
         -buildOutputFile $buildOutputFile `
         -testResultsFile $testResultsFile `
         -testResultsFormat 'JUnit' `
-        -installTestRunner:$repo.installTestRunner `
-        -installTestFramework:$repo.installTestFramework `
-        -installTestLibraries:$repo.installTestLibraries `
-        -installPerformanceToolkit:$repo.installPerformanceToolkit `
-        -enableCodeCop:$repo.enableCodeCop `
-        -enableAppSourceCop:$repo.enableAppSourceCop `
-        -enablePerTenantExtensionCop:$repo.enablePerTenantExtensionCop `
-        -enableUICop:$repo.enableUICop `
-        -customCodeCops:$repo.customCodeCops `
-        -azureDevOps:($environment -eq 'AzureDevOps') `
-        -gitLab:($environment -eq 'GitLab') `
-        -gitHubActions:($environment -eq 'GitHubActions') `
+        -customCodeCops $repo.customCodeCops `
+        -gitHubActions `
         -failOn $repo.failOn `
         -rulesetFile $repo.rulesetFile `
         -AppSourceCopMandatoryAffixes $repo.appSourceCopMandatoryAffixes `
         -additionalCountries $additionalCountries `
+        -obsoleteTagMinAllowedMajorMinor $repo.obsoleteTagMinAllowedMajorMinor `
         -buildArtifactFolder $buildArtifactFolder `
         -CreateRuntimePackages:$CreateRuntimePackages `
         -appBuild $appBuild -appRevision $appRevision `
-        -uninstallRemovedApps
+        -uninstallRemovedApps `
+        -RemoveBcContainer { Param([Hashtable]$parameters) Remove-BcContainerSession -containerName $parameters.ContainerName -killPsSessionProcess; Remove-BcContainer @parameters }
 
     if ($storageContext) {
         Write-Host "Publishing to $storageContainerName in $($storageAccount.StorageAccountName)"

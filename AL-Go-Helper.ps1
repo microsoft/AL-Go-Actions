@@ -83,7 +83,7 @@ function ConvertTo-HashTable {
     )
     $ht = @{}
     if ($object) {
-        $object.PSObject.Properties | Foreach { $ht[$_.Name] = $_.Value }
+        $object.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }
     }
     $ht
 }
@@ -214,7 +214,21 @@ function DownloadAndImportBcContainerHelper {
         if (Test-Path $repoSettingsPath) {
             if (-not $BcContainerHelperVersion) {
                 $repoSettings = Get-Content $repoSettingsPath -Encoding UTF8 | ConvertFrom-Json | ConvertTo-HashTable
-                if ($repoSettings.ContainsKey("BcContainerHelperVersion")) {
+                $ap = "$ENV:GITHUB_ACTION_PATH".Split('\')
+                if ($ap -and $ap.Count -gt 4) {
+                    $branch = $ap[$ap.Count-2]
+                    $owner = $ap[$ap.Count-4]
+                    if ($owner -eq "freddydk") {
+                        $bcContainerHelperVersion = "dev"
+                    }
+                    elseif ($owner -eq "businesscentralapps") {
+                        $bcContainerHelperVersion = "preview"
+                    }
+                    elseif ($owner -eq "microsoft" -and $branch -eq "preview") {
+                        $bcContainerHelperVersion = "preview"
+                    }
+                }
+                if ($bcContainerHelperVersion -eq "" -and $repoSettings.ContainsKey("BcContainerHelperVersion")) {
                     $BcContainerHelperVersion = $repoSettings.BcContainerHelperVersion
                 }
             }
@@ -319,7 +333,7 @@ function MergeCustomObjectIntoOrderedDictionary {
                         $srcElmType = $srcElm.GetType().Name
                         if ($srcElmType -eq "PSCustomObject") {
                             $ht = [ordered]@{}
-                            $srcElm.PSObject.Properties | Sort-Object -Property Name -Culture "iv-iv" | Foreach { $ht[$_.Name] = $_.Value }
+                            $srcElm.PSObject.Properties | Sort-Object -Property Name -Culture "iv-iv" | ForEach-Object { $ht[$_.Name] = $_.Value }
                             $dst."$prop" += @($ht)
                         }
                         else {
@@ -362,6 +376,7 @@ function ReadSettings {
         "insiderSasTokenSecretName"              = "InsiderSasToken"
         "ghTokenWorkflowSecretName"              = "GhTokenWorkflow"
         "adminCenterApiCredentialsSecretName"    = "AdminCenterApiCredentials"
+        "applicationInsightsConnectionStringSecretName" = "ApplicationInsightsConnectionString"
         "keyVaultCertificateUrlSecretName"       = ""
         "keyVaultCertificatePasswordSecretName"  = ""
         "keyVaultClientIdSecretName"             = ""
@@ -373,6 +388,7 @@ function ReadSettings {
         "appFolders"                             = @()
         "testDependencies"                       = @()
         "testFolders"                            = @()
+        "bcptTestFolders"                        = @()
         "installApps"                            = @()
         "installTestApps"                        = @()
         "installOnlyReferencedApps"              = $true
@@ -391,7 +407,11 @@ function ReadSettings {
         "rulesetFile"                            = ""
         "doNotBuildTests"                        = $false
         "doNotRunTests"                          = $false
+        "doNotRunBcptTests"                      = $false
+        "doNotPublishApps"                       = $false
+        "doNotSignApps"                          = $false
         "appSourceCopMandatoryAffixes"           = @()
+        "obsoleteTagMinAllowedMajorMinor"        = ""
         "memoryLimit"                            = ""
         "templateUrl"                            = ""
         "templateBranch"                         = ""
@@ -424,6 +444,16 @@ function ReadSettings {
                 # check settingsJson.version and do modifications if needed
          
                 MergeCustomObjectIntoOrderedDictionary -dst $settings -src $settingsJson
+
+                if ($settingsJson.PSObject.Properties.Name -eq "ConditionalSettings") {
+                    $settingsJson.ConditionalSettings | ForEach-Object {
+                        $conditionalSetting = $_
+                        if ($conditionalSetting.branches | Where-Object { $ENV:GITHUB_REF_NAME -like $_ }) {
+                            Write-Host "Applying conditional settings for $ENV:GITHUB_REF_NAME"
+                            MergeCustomObjectIntoOrderedDictionary -dst $settings -src $conditionalSetting.settings
+                        }
+                    }
+                }
             }
             catch {
                 throw "Settings file $settingsFile, is wrongly formatted. Error is $($_.Exception.Message)."
@@ -439,7 +469,8 @@ function AnalyzeRepo {
         [hashTable] $settings,
         [string] $baseFolder,
         [string] $insiderSasToken,
-        [switch] $doNotCheckArtifactSetting
+        [switch] $doNotCheckArtifactSetting,
+        [switch] $doNotIssueWarnings
     )
 
     if (!$runningLocal) {
@@ -448,7 +479,6 @@ function AnalyzeRepo {
 
     # Check applicationDependency
     [Version]$settings.applicationDependency | Out-null
-
 
     Write-Host "Checking type"
     if ($settings.type -eq "PTE") {
@@ -484,11 +514,12 @@ function AnalyzeRepo {
         }
     }
 
-    if (-not (@($settings.appFolders)+@($settings.testFolders))) {
+    if (-not (@($settings.appFolders)+@($settings.testFolders)+@($settings.bcptTestFolders))) {
         Get-ChildItem -Path $baseFolder -Directory | Where-Object { Test-Path -Path (Join-Path $_.FullName "app.json") } | ForEach-Object {
             $folder = $_
             $appJson = Get-Content (Join-Path $folder.FullName "app.json") -Encoding UTF8 | ConvertFrom-Json
             $isTestApp = $false
+            $isBcptTestApp = $false
             if ($appJson.PSObject.Properties.Name -eq "dependencies") {
                 $appJson.dependencies | ForEach-Object {
                     if ($_.PSObject.Properties.Name -eq "AppId") {
@@ -497,12 +528,18 @@ function AnalyzeRepo {
                     else {
                         $id = $_.Id
                     }
-                    if ($testRunnerApps.Contains($id)) { 
+                    if ($performanceToolkitApps.Contains($id)) { 
+                        $isBcptTestApp = $true
+                    }
+                    elseif ($testRunnerApps.Contains($id)) { 
                         $isTestApp = $true
                     }
                 }
             }
-            if ($isTestApp) {
+            if ($isBcptTestApp) {
+                $settings.bcptTestFolders += @($_.Name)
+            }
+            elseif ($isTestApp) {
                 $settings.testFolders += @($_.Name)
             }
             else {
@@ -513,15 +550,24 @@ function AnalyzeRepo {
 
     Write-Host "Checking appFolders and testFolders"
     $dependencies = [ordered]@{}
-    $true, $false | ForEach-Object {
-        $appFolder = $_
+    1..3 | ForEach-Object {
+        $appFolder = $_ -eq 1
+        $testFolder = $_ -eq 2
+        $bcptTestFolder = $_ -eq 3
         if ($appFolder) {
             $folders = @($settings.appFolders)
             $descr = "App folder"
         }
-        else {
+        elseif ($testFolder) {
             $folders = @($settings.testFolders)
             $descr = "Test folder"
+        }
+        elseif ($bcptTestFolder) {
+            $folders = @($settings.bcptTestFolders)
+            $descr = "Bcpt Test folder"
+        }
+        else {
+            throw "Internal error"
         }
         $folders | ForEach-Object {
             $folderName = $_
@@ -530,21 +576,29 @@ function AnalyzeRepo {
             }
             $folder = Join-Path $baseFolder $folderName
             $appJsonFile = Join-Path $folder "app.json"
+            $bcptSuiteFile = Join-Path $folder "bcptSuite.json"
             $removeFolder = $false
             if (-not (Test-Path $folder -PathType Container)) {
-                OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not exist."
+                if (!$doNotIssueWarnings) { OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not exist" }
                 $removeFolder = $true
             }
             elseif (-not (Test-Path $appJsonFile -PathType Leaf)) {
-                OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not contain the source code for an app (no app.json file)."
+                if (!$doNotIssueWarnings) { OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not contain the source code for an app (no app.json file)" }
+                $removeFolder = $true
+            }
+            elseif ($bcptTestFolder -and (-not (Test-Path $bcptSuiteFile -PathType Leaf))) {
+                if (!$doNotIssueWarnings) { OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not contain a BCPT Suite (bcptSuite.json)" }
                 $removeFolder = $true
             }
             if ($removeFolder) {
                 if ($appFolder) {
                     $settings.appFolders = @($settings.appFolders | Where-Object { $_ -ne $folderName })
                 }
-                else {
+                elseif ($testFolder) {
                     $settings.testFolders = @($settings.testFolders | Where-Object { $_ -ne $folderName })
+                }
+                elseif ($bcptTestFolder) {
+                    $settings.bcptTestFolders = @($settings.bcptTestFolders | Where-Object { $_ -ne $folderName })
                 }
             }
             else {
@@ -626,7 +680,7 @@ function AnalyzeRepo {
         }
     
         if ($settings.additionalCountries -or $country -ne $settings.country) {
-            if ($country -ne $settings.country) {
+            if ($country -ne $settings.country -and !$doNotIssueWarnings) {
                 OutputWarning -message "artifact definition in $ALGoSettingsFile uses a different country ($country) than the country definition ($($settings.country))"
             }
             Write-Host "Checking Country and additionalCountries"
@@ -696,6 +750,7 @@ function AnalyzeRepo {
 
     Write-Host "Analyzing Test App Dependencies"
     if ($settings.testFolders) { $settings.installTestRunner = $true }
+    if ($settings.bcptTestFolders) { $settings.installPerformanceToolkit = $true }
 
     $settings.appDependencies + $settings.testDependencies | ForEach-Object {
         $dep = $_
@@ -707,12 +762,16 @@ function AnalyzeRepo {
         }
     }
 
-    if (-not $settings.testFolders) {
-        OutputWarning -message "No test apps found in testFolders in $ALGoSettingsFile"
-        $doNotRunTests = $true
+    if (!$settings.doNotRunBcptTests -and -not $settings.bcptTestFolders) {
+        if (!$doNotIssueWarnings) { OutputWarning -message "No performance test apps found in bcptTestFolders in $ALGoSettingsFile" }
+        $settings.doNotRunBcptTests = $true
+    }
+    if (!$settings.doNotRunTests -and -not $settings.testFolders) {
+        if (!$doNotIssueWarnings) { OutputWarning -message "No test apps found in testFolders in $ALGoSettingsFile" }
+        $settings.doNotRunTests = $true
     }
     if (-not $settings.appFolders) {
-        OutputWarning -message "No apps found in appFolders in $ALGoSettingsFile"
+        if (!$doNotIssueWarnings) { OutputWarning -message "No apps found in appFolders in $ALGoSettingsFile" }
     }
 
     $settings
@@ -784,7 +843,7 @@ function CommitFromNewFolder {
     if ($commitMessage.Length -gt 250) {
         $commitMessage = "$($commitMessage.Substring(0,250))...)"
     }
-    invoke-git commit --allow-empty -m "$commitMessage"
+    invoke-git commit --allow-empty -m "'$commitMessage'"
     if ($branch) {
         invoke-git push -u $serverUrl $branch
         invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY
@@ -942,6 +1001,21 @@ function Enter-Value {
     $answer
 }
 
+function OptionallyConvertFromBase64 {
+    Param(
+        [string] $value
+    )
+
+    if ($value.StartsWith('::') -and $value.EndsWith('::')) {
+        if ($value.Length -eq 4) {
+            ""
+        }
+        else {
+            [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($value.Substring(2, $value.Length-4)))
+        }
+    }
+}
+
 function GetContainerName([string] $project) {
     "bc$($project -replace "\W")$env:GITHUB_RUN_ID"
 }
@@ -1026,6 +1100,15 @@ function CreateDevEnv {
                     if ($insiderSasTokenSecret) { $insiderSasToken = $insiderSasTokenSecret.SecretValue | Get-PlainText }
 
                     # do not add codesign cert.
+
+                    if ($settings.applicationInsightsConnectionStringSecretName) {
+                        $applicationInsightsConnectionStringSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.applicationInsightsConnectionStringSecretName
+                        if ($applicationInsightsConnectionStringSecret) {
+                            $runAlPipelineParams += @{ 
+                                "applicationInsightsConnectionString" = $applicationInsightsConnectionStringSecret.SecretValue | Get-PlainText
+                            }
+                        }
+                    }
                     
                     if ($settings.KeyVaultCertificateUrlSecretName) {
                         $KeyVaultCertificateUrlSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.KeyVaultCertificateUrlSecretName
@@ -1206,6 +1289,17 @@ function CreateDevEnv {
             }
         }
         
+        "installTestRunner",
+        "installTestFramework",
+        "installTestLibraries",
+        "installPerformanceToolkit",
+        "enableCodeCop",
+        "enableAppSourceCop",
+        "enablePerTenantExtensionCop",
+        "enableUICop" | ForEach-Object {
+            if ($repo."$_") { $runAlPipelineParams += @{ "$_" = $true } }
+        }
+
         Run-AlPipeline @runAlPipelineParams `
             -pipelinename $workflowName `
             -imageName "" `
@@ -1219,22 +1313,16 @@ function CreateDevEnv {
             -testFolders $repo.testFolders `
             -testResultsFile $testResultsFile `
             -testResultsFormat 'JUnit' `
-            -installTestRunner:$repo.installTestRunner `
-            -installTestFramework:$repo.installTestFramework `
-            -installTestLibraries:$repo.installTestLibraries `
-            -installPerformanceToolkit:$repo.installPerformanceToolkit `
-            -enableCodeCop:$repo.enableCodeCop `
-            -enableAppSourceCop:$repo.enableAppSourceCop `
-            -enablePerTenantExtensionCop:$repo.enablePerTenantExtensionCop `
-            -enableUICop:$repo.enableUICop `
-            -customCodeCops:$repo.customCodeCops `
+            -customCodeCops $repo.customCodeCops `
             -azureDevOps:($caller -eq 'AzureDevOps') `
             -gitLab:($caller -eq 'GitLab') `
             -gitHubActions:($caller -eq 'GitHubActions') `
             -failOn $repo.failOn `
             -rulesetFile $repo.rulesetFile `
             -AppSourceCopMandatoryAffixes $repo.appSourceCopMandatoryAffixes `
+            -obsoleteTagMinAllowedMajorMinor $repo.obsoleteTagMinAllowedMajorMinor `
             -doNotRunTests `
+            -doNotRunBcptTests `
             -useDevEndpoint `
             -keepContainer
     }
@@ -1253,7 +1341,7 @@ function ConvertTo-HashTable() {
     )
     $ht = @{}
     if ($object) {
-        $object.PSObject.Properties | Foreach { $ht[$_.Name] = $_.Value }
+        $object.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }
     }
     $ht
 }

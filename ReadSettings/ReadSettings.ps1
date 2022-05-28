@@ -22,6 +22,7 @@ Param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 $telemetryScope = $null
+$bcContainerHelperPath = $null
 
 # IMPORTANT: No code that can fail should be outside the try/catch
 
@@ -42,6 +43,10 @@ try {
     }
     else {
         $getSettings = @($settings.Keys)
+    }
+
+    if ($ENV:GITHUB_EVENT_NAME -eq "pull_request") {
+        $settings.doNotSignApps = $true
     }
 
     if ($settings.appBuild -eq [int32]::MaxValue) {
@@ -146,10 +151,10 @@ try {
         }
         $environments = @($environments+@($settings.Environments) | Where-Object { 
             if ($includeProduction) {
-                $_ -like $getEnvironments -or $_ -like "$getEnvironments (Production)"
+                $_ -like $getEnvironments -or $_ -like "$getEnvironments (PROD)" -or $_ -like "$getEnvironments (Production)" -or $_ -like "$getEnvironments (FAT)" -or $_ -like "$getEnvironments (Final Acceptance Test)"
             }
             else {
-                $_ -like $getEnvironments -and $_ -notlike '* (Production)'
+                $_ -like $getEnvironments -and $_ -notlike '* (PROD)' -and $_ -notlike '* (Production)' -and $_ -notlike '* (FAT)' -and $_ -notlike '* (Final Acceptance Test)'
             }
         })
         if ($environments.Count -eq 1) {
