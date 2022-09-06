@@ -92,7 +92,7 @@ try {
     Write-Host "set-output name=SettingsJson::$outSettingsJson"
     Add-Content -Path $env:GITHUB_ENV -Value "Settings=$OutSettingsJson"
 
-    $gitHubRunner = $settings.githubRunner.Split(',') | ConvertTo-Json -compress
+    $gitHubRunner = $settings.githubRunner.Split(',').Trim() | ConvertTo-Json -compress
     Write-Host "::set-output name=GitHubRunnerJson::$githubRunner"
     Write-Host "set-output name=GitHubRunnerJson::$githubRunner"
 
@@ -179,11 +179,11 @@ try {
         $json = @{"matrix" = @{ "include" = @() }; "fail-fast" = $false }
         $environments | ForEach-Object { 
             $environmentGitHubRunnerKey = "$($_.Split(' ')[0])_GitHubRunner"
-            $os = $settings."runs-on"
+            $os = $settings."runs-on".Split(',').Trim()
             if (([HashTable]$settings).ContainsKey($environmentGitHubRunnerKey)) {
-                $os = $settings."$environmentGitHubRunnerKey"
+                $os = $settings."$environmentGitHubRunnerKey".Split(',').Trim()
             }
-            $json.matrix.include += @{ "environment" = $_; "os" = $os }
+            $json.matrix.include += @{ "environment" = $_; "os" = "$($os | ConvertTo-Json -compress)" }
         }
         $environmentsJson = $json | ConvertTo-Json -Depth 99 -compress
         Write-Host "::set-output name=EnvironmentsJson::$environmentsJson"
