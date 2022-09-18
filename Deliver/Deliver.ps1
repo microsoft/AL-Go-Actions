@@ -11,8 +11,8 @@ Param(
     [string] $deliveryTarget,
     [Parameter(HelpMessage = "Artifacts to deliver", Mandatory = $true)]
     [string] $artifacts,
-    [Parameter(HelpMessage = "Type of delivery (CD or Publish)", Mandatory = $false)]
-    [ValidateSet('CD','Publish')]
+    [Parameter(HelpMessage = "Type of delivery (CD or Release)", Mandatory = $false)]
+    [ValidateSet('CD','Release')]
     [string] $type = "CD",
     [Parameter(HelpMessage = "Types of artifacts to deliver (Apps,Dependencies,TestApps)", Mandatory = $false)]
     [string] $atypes = "Apps,Dependencies,TestApps",
@@ -35,6 +35,9 @@ try {
     $telemetryScope = CreateScope -eventId 'DO0081' -parentTelemetryScopeJson $parentTelemetryScopeJson
 
     if ($projects -eq '') { $projects = "*" }
+    if ($projects.StartsWith('[')) {
+        $projects = ($projects | ConvertFrom-Json) -join ","
+    }
 
     $settings = ReadSettings -baseFolder $ENV:GITHUB_WORKSPACE -workflowName $env:GITHUB_WORKFLOW
     if ($settings.Projects) {
@@ -144,6 +147,7 @@ try {
             $parameters = @{
                 "Project" = $thisProject
                 "ProjectName" = $projectName
+                "type" = $type
                 "Context" = $env:deliveryContext
                 "RepoSettings" = $settings
                 "ProjectSettings" = $projectSettings
@@ -162,13 +166,23 @@ try {
                 $testAppsFolder | Out-Host
                 throw "Internal error - multiple testApps folders located"
             }
-            $parameters.testAppsFolder = $testAppsFolder[0]
+            elseif ($testAppsFolder.Count -eq 1) {
+                $parameters.testAppsFolder = $testAppsFolder[0]
+            }
+            else {
+                $parameters.testAppsFolder = ""
+            }
             $dependenciesFolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-Dependencies-*") -Directory)
             if ($dependenciesFolder.Count -gt 1) {
                 $dependenciesFolder | Out-Host
                 throw "Internal error - multiple dependencies folders located"
             }
-            $parameters.dependenciesFolder = $dependenciesFolder[0]
+            elseif ($dependenciesFolder.Count -eq 1) {
+                $parameters.dependenciesFolder = $dependenciesFolder[0]
+            }
+            else {
+                $parameters.dependenciesFolder = ""
+            }
             . $customScript -parameters $parameters
         }
         elseif ($deliveryTarget -eq "Storage") {
@@ -225,7 +239,7 @@ try {
                     $version = $artfolder.SubString($artfolder.IndexOf("-$atype-")+"-$atype-".Length)
                     Write-Host $artfolder
                     $versions = @("$version-preview","preview")
-                    if ($type -eq "Publish") {
+                    if ($type -eq "Release") {
                         $versions += @($version,"latest")
                     }
                     $tempFile = Join-Path $ENV:TEMP "$([Guid]::newguid().ToString()).zip"
