@@ -20,14 +20,16 @@ function MaskValueInLog {
     $value.ToCharArray() | ForEach-Object {
         $chint = [int]$_
         if ($chint -lt 32 -or $chint -gt 126 ) {
-            throw "Secret $key contains characters, which are not supported in secrets in AL-Go for GitHub. This exception is thrown to avoid that the secret is revealed in the log."
+            $val2 += $_
         }
         else {
-            $val2 += $script:escchars[$chint-32]
+           $val2 += $script:escchars[$chint-32]
         }
     }
 
     Write-Host "::add-mask::$val2"
+
+    Write-Host "::add-mask::$([Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($value)))"
 }
 
 function GetGithubSecret {
@@ -73,8 +75,12 @@ function InstallKeyVaultModuleIfNeeded {
         return
     }
 
-    if (-not (Get-InstalledModule -Name 'Az.KeyVault' -erroraction 'silentlycontinue')) {
-
+    $AzKeyVaultModule = Get-InstalledModule -Name 'Az.KeyVault' -erroraction 'silentlycontinue'
+    if ($AzKeyVaultModule) {
+        Write-Host "Using Az.KeyVault version $($AzKeyVaultModule.Version)"
+        Import-Module  'Az.KeyVault' -DisableNameChecking -WarningAction SilentlyContinue
+    }
+    else {
         $azureRmKeyVaultModule = Get-Module -name 'AzureRm.KeyVault' -ListAvailable | Select-Object -First 1
         if ($azureRmKeyVaultModule) { Write-Host "AzureRm.KeyVault Module is available in version $($azureRmKeyVaultModule.Version)" }
         $azureRmProfileModule = Get-Module -name 'AzureRm.Profile' -ListAvailable | Select-Object -First 1
@@ -90,7 +96,6 @@ function InstallKeyVaultModuleIfNeeded {
             Write-Host "Installing and importing Az.KeyVault." 
             Install-Module 'Az.KeyVault' -Force
             Import-Module  'Az.KeyVault' -DisableNameChecking -WarningAction SilentlyContinue | Out-Null
-    
         }
     }
 }
@@ -116,7 +121,7 @@ function ConnectAzureKeyVaultIfNeeded {
             Clear-AzContext -Scope Process
             Clear-AzContext -Scope CurrentUser -Force -ErrorAction SilentlyContinue
             Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential | Out-Null
-            Set-AzContext -SubscriptionId $subscriptionId | Out-Null
+            Set-AzContext -SubscriptionId $subscriptionId -Tenant $tenantId | Out-Null
         }
         $script:keyvaultConnectionExists = $true
         Write-Host "Successfully connected to Azure Key Vault."

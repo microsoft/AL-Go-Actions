@@ -17,6 +17,8 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 $telemetryScope = $null
 $bcContainerHelperPath = $null
+$containerBaseFolder = $null
+$projectPath = $null
 
 # IMPORTANT: No code that can fail should be outside the try/catch
 
@@ -33,15 +35,29 @@ try {
         docker pull --quiet $genericImageName
     } -ArgumentList $genericImageName | Out-Null
 
+    $containerName = GetContainerName($project)
+
     $runAlPipelineParams = @{}
     if ($project  -eq ".") { $project = "" }
-    $baseFolder = Join-Path $ENV:GITHUB_WORKSPACE $project
+    $baseFolder = $ENV:GITHUB_WORKSPACE
+    if ($bcContainerHelperConfig.useVolumes -and $bcContainerHelperConfig.hostHelperFolder -eq "HostHelperFolder") {
+        $allVolumes = "{$(((docker volume ls --format "'{{.Name}}': '{{.Mountpoint}}'") -join ",").Replace('\','\\').Replace("'",'"'))}" | ConvertFrom-Json | ConvertTo-HashTable
+        $containerBaseFolder = Join-Path $allVolumes.hostHelperFolder $containerName
+        if (Test-Path $containerBaseFolder) {
+            Remove-Item -Path $containerBaseFolder -Recurse -Force
+        }
+        Write-Host "Creating temp folder"
+        New-Item -Path $containerBaseFolder -ItemType Directory | Out-Null
+        Copy-Item -Path $ENV:GITHUB_WORKSPACE -Destination $containerBaseFolder -Recurse -Force
+        $baseFolder = Join-Path $containerBaseFolder (Get-Item -Path $ENV:GITHUB_WORKSPACE).BaseName
+    }
+
+    $projectPath = Join-Path $baseFolder $project
     $sharedFolder = ""
     if ($project) {
-        $sharedFolder = $ENV:GITHUB_WORKSPACE
+        $sharedFolder = $baseFolder
     }
     $workflowName = $env:GITHUB_WORKFLOW
-    $containerName = GetContainerName($project)
 
     Write-Host "use settings and secrets"
     $settings = $settingsJson | ConvertFrom-Json | ConvertTo-HashTable
@@ -50,7 +66,7 @@ try {
     $appRevision = $settings.appRevision
     'licenseFileUrl','insiderSasToken','CodeSignCertificateUrl','CodeSignCertificatePassword','KeyVaultCertificateUrl','KeyVaultCertificatePassword','KeyVaultClientId','StorageContext','ApplicationInsightsConnectionString' | ForEach-Object {
         if ($secrets.ContainsKey($_)) {
-            $value = $secrets."$_"
+            $value = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets."$_"))
         }
         else {
             $value = ""
@@ -58,7 +74,7 @@ try {
         Set-Variable -Name $_ -Value $value
     }
 
-    $repo = AnalyzeRepo -settings $settings -baseFolder $baseFolder -insiderSasToken $insiderSasToken
+    $repo = AnalyzeRepo -settings $settings -token $token -baseFolder $baseFolder -project $project -insiderSasToken $insiderSasToken
     if ((-not $repo.appFolders) -and (-not $repo.testFolders)) {
         Write-Host "Repository is empty, exiting"
         exit
@@ -71,58 +87,17 @@ try {
         }
     }
 
-    if ($storageContext) {
-        if ($project) {
-            $projectName = $project -replace "[^a-z0-9]", "-"
-        }
-        else {
-            $projectName = $repo.repoName -replace "[^a-z0-9]", "-"
-        }
-        try {
-            if (get-command New-AzureStorageContext -ErrorAction SilentlyContinue) {
-                Write-Host "Using Azure.Storage PowerShell module"
-            }
-            else {
-                if (!(get-command New-AzStorageContext -ErrorAction SilentlyContinue)) {
-                    OutputError -message "When publishing to storage account, the build agent needs to have either the Azure.Storage or the Az.Storage PowerShell module installed."
-                    exit
-                }
-                Write-Host "Using Az.Storage PowerShell module"
-                Set-Alias -Name New-AzureStorageContext -Value New-AzStorageContext
-                Set-Alias -Name Get-AzureStorageContainer -Value Get-AzStorageContainer
-                Set-Alias -Name Set-AzureStorageBlobContent -Value Set-AzStorageBlobContent
-            }
-
-            $storageAccount = $storageContext | ConvertFrom-Json | ConvertTo-HashTable
-            if ($storageAccount.ContainsKey('sastoken')) {
-                $storageContext = New-AzureStorageContext -StorageAccountName $storageAccount.StorageAccountName -SasToken $storageAccount.sastoken
-            }
-            else {
-                $storageContext = New-AzureStorageContext -StorageAccountName $storageAccount.StorageAccountName -StorageAccountKey $storageAccount.StorageAccountKey
-            }
-            Write-Host "Storage Context OK"
-            $storageContainerName =  $storageAccount.ContainerName.ToLowerInvariant().replace('{project}',$projectName).ToLowerInvariant()
-            $storageBlobName = $storageAccount.BlobName.ToLowerInvariant()
-            Write-Host "Storage Container Name is $storageContainerName"
-            Write-Host "Storage Blob Name is $storageBlobName"
-            Get-AzureStorageContainer -Context $storageContext -name $storageContainerName | Out-Null
-        }
-        catch {
-            OutputWarning -message "StorageContext secret is malformed. Needs to be formatted as Json, containing StorageAccountName, containerName, blobName and sastoken or storageAccountKey, which points to an existing container in a storage account."
-            $storageContext = $null
-        }
-    }
-
     $artifact = $repo.artifact
     $installApps = $repo.installApps
     $installTestApps = $repo.installTestApps
 
     if ($repo.appDependencyProbingPaths) {
-        Write-Host "Downloading dependencies ..."
-        $installApps += Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths -token $token -mask "-Apps-"
-        Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths -token $token -mask "-TestApps-" | ForEach-Object {
+        Write-Host "::group::Downloading dependencies"
+        $installApps += Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths -mask "Apps"
+        Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths -mask "TestApps" | ForEach-Object {
             $installTestApps += "($_)"
         }
+        Write-Host "::endgroup::"
     }
     
     # Analyze app.json version dependencies before launching pipeline
@@ -156,6 +131,7 @@ try {
         OutputWarning -message "Skipping upgrade tests"
     }
     else {
+        Write-Host "::group::Locating previous release"
         try {
             $releasesJson = GetReleases -token $token -api_url $ENV:GITHUB_API_URL -repository $ENV:GITHUB_REPOSITORY
             if ($env:GITHUB_REF_NAME -like 'release/*') {
@@ -169,7 +145,7 @@ try {
                 Write-Host "Using $($latestRelease.name) as previous release"
                 $artifactsFolder = Join-Path $baseFolder "artifacts"
                 New-Item $artifactsFolder -ItemType Directory | Out-Null
-                DownloadRelease -token $token -projects $project -api_url $ENV:GITHUB_API_URL -repository $ENV:GITHUB_REPOSITORY -release $latestRelease -path $artifactsFolder
+                DownloadRelease -token $token -projects $project -api_url $ENV:GITHUB_API_URL -repository $ENV:GITHUB_REPOSITORY -release $latestRelease -path $artifactsFolder -mask "Apps"
                 $previousApps += @(Get-ChildItem -Path $artifactsFolder | ForEach-Object { $_.FullName })
             }
             else {
@@ -180,6 +156,7 @@ try {
             OutputError -message "Error trying to locate previous release. Error was $($_.Exception.Message)"
             exit
         }
+        Write-Host "::endgroup::"
     }
 
     $additionalCountries = $repo.additionalCountries
@@ -187,7 +164,11 @@ try {
     $imageName = ""
     if ($repo.gitHubRunner -ne "windows-latest") {
         $imageName = $repo.cacheImageName
-        Flush-ContainerHelperCache -keepdays $repo.cacheKeepDays
+        if ($imageName) {
+            Write-Host "::group::Flush ContainerHelper Cache"
+            Flush-ContainerHelperCache -keepdays $repo.cacheKeepDays
+            Write-Host "::endgroup::"
+        }
     }
     $authContext = $null
     $environmentName = ""
@@ -207,21 +188,21 @@ try {
         }
     }
     
-    $buildArtifactFolder = Join-Path $baseFolder "output"
+    $buildArtifactFolder = Join-Path $projectPath ".buildartifacts"
     New-Item $buildArtifactFolder -ItemType Directory | Out-Null
 
     $allTestResults = "testresults*.xml"
-    $testResultsFile = Join-Path $baseFolder "TestResults.xml"
-    $testResultsFiles = Join-Path $baseFolder $allTestResults
+    $testResultsFile = Join-Path $projectPath "TestResults.xml"
+    $testResultsFiles = Join-Path $projectPath $allTestResults
     if (Test-Path $testResultsFiles) {
         Remove-Item $testResultsFiles -Force
     }
 
-    $buildOutputFile = Join-Path $baseFolder "BuildOutput.txt"
+    $buildOutputFile = Join-Path $projectPath "BuildOutput.txt"
 
     "containerName=$containerName" | Add-Content $ENV:GITHUB_ENV
 
-    Set-Location $baseFolder
+    Set-Location $projectPath
     $runAlPipelineOverrides | ForEach-Object {
         $scriptName = $_
         $scriptPath = Join-Path $ALGoFolder "$ScriptName.ps1"
@@ -229,6 +210,52 @@ try {
             Write-Host "Add override for $scriptName"
             $runAlPipelineParams += @{
                 "$scriptName" = (Get-Command $scriptPath | Select-Object -ExpandProperty ScriptBlock)
+            }
+        }
+    }
+
+    if (-not $runAlPipelineParams.ContainsKey('RemoveBcContainer')) {
+        $runAlPipelineParams += @{
+            "RemoveBcContainer" = {
+                Param([Hashtable]$parameters)
+                Remove-BcContainerSession -containerName $parameters.ContainerName -killPsSessionProcess
+                Remove-BcContainer @parameters
+            }
+        }
+    }
+
+    if (-not $runAlPipelineParams.ContainsKey('ImportTestDataInBcContainer')) {
+        if (($repo.configPackages) -or ($repo.Keys | Where-Object { $_ -like 'configPackages.*' })) {
+            Write-Host "Adding Import Test Data override"
+            Write-Host "Configured config packages:"
+            $repo.Keys | Where-Object { $_ -like 'configPackages*' } | ForEach-Object {
+                Write-Host "- $($_):"
+                $repo."$_" | ForEach-Object {
+                    Write-Host "  - $_"
+                }
+            }
+            $runAlPipelineParams += @{
+                "ImportTestDataInBcContainer" = {
+                    Param([Hashtable]$parameters)
+                    $country = Get-BcContainerCountry -containerOrImageName $parameters.containerName
+                    $prop = "configPackages.$country"
+                    if (-not $repo.ContainsKey($prop)) {
+                        $prop = "configPackages"
+                    }
+                    if ($repo."$prop") {
+                        Write-Host "Importing config packages from $prop"
+                        $repo."$prop" | ForEach-Object {
+                            $configPackage = $_.Split(',')[0].Replace('{COUNTRY}',$country)
+                            $packageId = $_.Split(',')[1]
+                            UploadImportAndApply-ConfigPackageInBcContainer `
+                                -containerName $parameters.containerName `
+                                -Credential $parameters.credential `
+                                -Tenant $parameters.tenant `
+                                -ConfigPackage $configPackage `
+                                -PackageId $packageId
+                        }
+                    }
+               }
             }
         }
     }
@@ -258,7 +285,7 @@ try {
         -artifact $artifact.replace('{INSIDERSASTOKEN}',$insiderSasToken) `
         -companyName $repo.companyName `
         -memoryLimit $repo.memoryLimit `
-        -baseFolder $baseFolder `
+        -baseFolder $projectPath `
         -sharedFolder $sharedFolder `
         -licenseFile $LicenseFileUrl `
         -installApps $installApps `
@@ -283,40 +310,30 @@ try {
         -buildArtifactFolder $buildArtifactFolder `
         -CreateRuntimePackages:$CreateRuntimePackages `
         -appBuild $appBuild -appRevision $appRevision `
-        -uninstallRemovedApps `
-        -RemoveBcContainer { Param([Hashtable]$parameters) Remove-BcContainerSession -containerName $parameters.ContainerName -killPsSessionProcess; Remove-BcContainer @parameters }
+        -uninstallRemovedApps
 
-    if ($storageContext) {
-        Write-Host "Publishing to $storageContainerName in $($storageAccount.StorageAccountName)"
-        "Apps","TestApps" | ForEach-Object {
-            $type = $_
-            $artfolder = Join-Path $buildArtifactFolder $type
-            if (Test-Path "$artfolder\*") {
-                $versions = @("$($repo.repoVersion).$appBuild.$appRevision-preview","preview")
-                $tempFile = Join-Path $ENV:TEMP "$([Guid]::newguid().ToString()).zip"
-                try {
-                    Write-Host "Compressing"
-                    Compress-Archive -Path $artfolder -DestinationPath $tempFile -Force
-                    $versions | ForEach-Object {
-                        $version = $_
-                        $blob = $storageBlobName.replace('{project}',$projectName).replace('{version}',$version).replace('{type}',$type).ToLowerInvariant()
-                        Write-Host "Publishing $blob"
-                        Set-AzureStorageBlobContent -Context $storageContext -Container $storageContainerName -File $tempFile -blob $blob -Force | Out-Null
-                    }
-                }
-                finally {
-                    Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
-                }
-            }
-        }
+    if ($containerBaseFolder) {
+
+        Write-Host "Copy artifacts and build output back from build container"
+        $destFolder = Join-Path $ENV:GITHUB_WORKSPACE $project
+        Copy-Item -Path (Join-Path $projectPath ".buildartifacts") -Destination $destFolder -Recurse -Force
+        Copy-Item -Path (Join-Path $projectPath ".output") -Destination $destFolder -Recurse -Force
+        Copy-Item -Path (Join-Path $projectPath "testResults*.xml") -Destination $destFolder
+        Copy-Item -Path (Join-Path $projectPath "bcptTestResults*.json") -Destination $destFolder
+        Copy-Item -Path (Join-Path $projectPath "buildoutput.txt") -Destination $destFolder
     }
 
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message $_.Exception.Message
+    OutputError -message "RunPipeline action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
     TrackException -telemetryScope $telemetryScope -errorRecord $_
 }
 finally {
     CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
+    if ($containerBaseFolder -and (Test-Path $containerBaseFolder) -and $projectPath -and (Test-Path $projectPath)) {
+        Write-Host "Removing temp folder"
+        Remove-Item -Path (Join-Path $projectPath '*') -Recurse -Force
+        Write-Host "Done"
+    }
 }

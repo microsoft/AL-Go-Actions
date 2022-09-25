@@ -48,6 +48,7 @@ try {
         $scopeJson = "{}"
         $correlationId = [guid]::Empty.ToString()
     }
+
     Write-Host "::set-output name=telemetryScopeJson::$scopeJson"
     Write-Host "set-output name=telemetryScopeJson::$scopeJson"
 
@@ -56,7 +57,7 @@ try {
 
 }
 catch {
-    OutputError -message $_.Exception.Message
+    OutputError -message "WorkflowInitialize action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
     TrackException -telemetryScope $telemetryScope -errorRecord $_
 }
 finally {

@@ -30,8 +30,13 @@ try {
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0071' -parentTelemetryScopeJson $parentTelemetryScopeJson
 
-    if ($update -and -not $token) {
-        throw "A personal access token with permissions to modify Workflows is needed. You must add a secret called GhTokenWorkflow containing a personal access token. You can Generate a new token from https://github.com/settings/tokens. Make sure that the workflow scope is checked."
+    if ($update) {
+        if (-not $token) {
+            throw "A personal access token with permissions to modify Workflows is needed. You must add a secret called GhTokenWorkflow containing a personal access token. You can Generate a new token from https://github.com/settings/tokens. Make sure that the workflow scope is checked."
+        }
+        else {
+            $token = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($token))
+        }
     }
 
     # Support old calling convention
@@ -78,7 +83,7 @@ try {
         try {
             $templateUrl = $templateUrl -replace "https://www.github.com/","$ENV:GITHUB_API_URL/repos/" -replace "https://github.com/","$ENV:GITHUB_API_URL/repos/"
             Write-Host "Api url $templateUrl"
-            $templateInfo = Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri $templateUrl | ConvertFrom-Json
+            $templateInfo = InvokeWebRequest -Headers $headers -Uri $templateUrl | ConvertFrom-Json
         }
         catch {
             throw "Could not retrieve the template repository. Error: $($_.Exception.Message)"
@@ -86,7 +91,7 @@ try {
     }
     else {
         Write-Host "Api url $($ENV:GITHUB_API_URL)/repos/$($ENV:GITHUB_REPOSITORY)"
-        $repoInfo = Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri "$($ENV:GITHUB_API_URL)/repos/$($ENV:GITHUB_REPOSITORY)" | ConvertFrom-Json
+        $repoInfo = InvokeWebRequest -Headers $headers -Uri "$($ENV:GITHUB_API_URL)/repos/$($ENV:GITHUB_REPOSITORY)" | ConvertFrom-Json
         if (!($repoInfo.PSObject.Properties.Name -eq "template_repository")) {
             OutputWarning -message "This repository wasn't built on a template repository, or the template repository is deleted. You must specify a template repository in the AL-Go settings file."
             exit
@@ -103,7 +108,7 @@ try {
     }
     $archiveUrl = $templateInfo.archive_url.Replace('{archive_format}','zipball').replace('{/ref}',"/$templateBranch")
     $tempName = Join-Path $env:TEMP ([Guid]::NewGuid().ToString())
-    Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri $archiveUrl -OutFile "$tempName.zip"
+    InvokeWebRequest -Headers $headers -Uri $archiveUrl -OutFile "$tempName.zip"
     Expand-7zipArchive -Path "$tempName.zip" -DestinationPath $tempName
     Remove-Item -Path "$tempName.zip"
     
@@ -145,17 +150,42 @@ try {
                 $replacePattern = "on:`r`n  schedule:`r`n  - cron: '$($repoSettings."$workflowScheduleKey")'`r`n  workflow_dispatch:`r`n"
                 $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
             }
+
+            if ($baseName -eq "CICD") {
+                $srcPattern = "  push:`r`n    paths-ignore:`r`n      - 'README.md'`r`n      - '.github/**'`r`n    branches: [ '$($defaultCICDPushBranches -join ''', ''')' ]`r`n  pull_request:`r`n    paths-ignore:`r`n      - 'README.md'`r`n      - '.github/**'`r`n    branches: [ '$($defaultCICDPullRequestBranches -join ''', ''')' ]`r`n"
+                $replacePattern = ''
+                if ($repoSettings.ContainsKey('CICDPushBranches')) {
+                    $CICDPushBranches = $repoSettings.CICDPushBranches
+                }
+                elseif ($repoSettings.ContainsKey($workflowScheduleKey)) {
+                    $CICDPushBranches = ''
+                }
+                else {
+                    $CICDPushBranches = $defaultCICDPushBranches
+                }
+                if ($CICDPushBranches) {
+                    $replacePattern += "  push:`r`n    paths-ignore:`r`n      - 'README.md'`r`n      - '.github/**'`r`n    branches: [ '$($CICDPushBranches -join ''', ''')' ]`r`n"
+                }
+                if ($repoSettings.ContainsKey('CICDPullRequestBranches')) {
+                    $CICDPullRequestBranches = $repoSettings.CICDPullRequestBranches
+                }
+                elseif ($repoSettings.ContainsKey($workflowScheduleKey)) {
+                    $CICDPullRequestBranches = ''
+                }
+                else {
+                    $CICDPullRequestBranches = $defaultCICDPullRequestBranches
+                }
+                if ($CICDPullRequestBranches) {
+                    $replacePattern += "  pull_request:`r`n    paths-ignore:`r`n      - 'README.md'`r`n      - '.github/**'`r`n    branches: [ '$($CICDPullRequestBranches -join ''', ''')' ]`r`n"
+                }
+                $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
+            }
             
             if ($baseName -ne "UpdateGitHubGoSystemFiles") {
                 if ($repoSettings.ContainsKey("runs-on")) {
                     $srcPattern = "runs-on: [ windows-latest ]`r`n"
                     $replacePattern = "runs-on: [ $($repoSettings."runs-on") ]`r`n"
                     $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
-                    if (!($repoSettings.ContainsKey("gitHubRunner"))) {
-                        $srcPattern = "runs-on: `${{ fromJson(needs.Initialization.outputs.githubRunner) }}`r`n"
-                        $replacePattern = "runs-on: [ $($repoSettings."runs-on") ]`r`n"
-                        $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
-                    }
                 }
             }
                 
@@ -237,33 +267,36 @@ try {
                 $repoSettings | ConvertTo-Json -Depth 99 | Set-Content $repoSettingsFile -Encoding UTF8
 
                 $releaseNotes = ""
-                $updateFiles | ForEach-Object {
-                    $path = [System.IO.Path]::GetDirectoryName($_.DstFile)
-                    if (-not (Test-Path -path $path -PathType Container)) {
-                        New-Item -Path $path -ItemType Directory | Out-Null
-                    }
-                    if (([System.IO.Path]::GetFileName($_.DstFile) -eq "RELEASENOTES.copy.md") -and (Test-Path $_.DstFile)) {
-                        $oldReleaseNotes = (Get-Content -Path $_.DstFile -Encoding UTF8 -Raw).Replace("`r", "").TrimEnd("`n").Replace("`n", "`r`n")
-                        while ($oldReleaseNotes) {
-                            $releaseNotes = $_.Content
-                            if ($releaseNotes.indexOf($oldReleaseNotes) -gt 0) {
-                                $releaseNotes = $releaseNotes.SubString(0, $releaseNotes.indexOf($oldReleaseNotes))
-                                $oldReleaseNotes = ""
-                            }
-                            else {
-                                $idx = $oldReleaseNotes.IndexOf("`r`n## ")
-                                if ($idx -gt 0) {
-                                    $oldReleaseNotes = $oldReleaseNotes.Substring($idx)
+                try {
+                    $updateFiles | ForEach-Object {
+                        $path = [System.IO.Path]::GetDirectoryName($_.DstFile)
+                        if (-not (Test-Path -path $path -PathType Container)) {
+                            New-Item -Path $path -ItemType Directory | Out-Null
+                        }
+                        if (([System.IO.Path]::GetFileName($_.DstFile) -eq "RELEASENOTES.copy.md") -and (Test-Path $_.DstFile)) {
+                            $oldReleaseNotes = (Get-Content -Path $_.DstFile -Encoding UTF8 -Raw).Replace("`r", "").TrimEnd("`n").Replace("`n", "`r`n")
+                            while ($oldReleaseNotes) {
+                                $releaseNotes = $_.Content
+                                if ($releaseNotes.indexOf($oldReleaseNotes) -gt 0) {
+                                    $releaseNotes = $releaseNotes.SubString(0, $releaseNotes.indexOf($oldReleaseNotes))
+                                    $oldReleaseNotes = ""
                                 }
                                 else {
-                                    $oldReleaseNotes = ""
+                                    $idx = $oldReleaseNotes.IndexOf("`r`n## ")
+                                    if ($idx -gt 0) {
+                                        $oldReleaseNotes = $oldReleaseNotes.Substring($idx)
+                                    }
+                                    else {
+                                        $oldReleaseNotes = ""
+                                    }
                                 }
                             }
                         }
+                        Write-Host "Update $($_.DstFile)"
+                        Set-Content -Path $_.DstFile -Encoding UTF8 -Value $_.Content
                     }
-                    Write-Host "Update $($_.DstFile)"
-                    Set-Content -Path $_.DstFile -Encoding UTF8 -Value $_.Content
                 }
+                catch {}
                 if ($releaseNotes -eq "") {
                     $releaseNotes = "No release notes available!"
                 }
@@ -277,7 +310,7 @@ try {
                 Write-Host "ReleaseNotes:"
                 Write-Host $releaseNotes
 
-                $status = invoke-git status --porcelain=v1
+                $status = invoke-git -returnValue status --porcelain=v1
                 if ($status) {
                     $message = "Updated AL-Go System Files"
 
@@ -312,7 +345,7 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message $_.Exception.Message
+    OutputError -message "CheckForUpdates action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
     TrackException -telemetryScope $telemetryScope -errorRecord $_
 }
 finally {

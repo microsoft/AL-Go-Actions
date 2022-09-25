@@ -32,6 +32,8 @@ try {
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0073' -parentTelemetryScopeJson $parentTelemetryScopeJson
 
+    $adminCenterApiCredentials = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($adminCenterApiCredentials))
+
     Write-Host "Reading $ALGoSettingsFile"
     $settingsJson = Get-Content $ALGoSettingsFile -Encoding UTF8 | ConvertFrom-Json
 
@@ -49,7 +51,7 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message "Creating a development environment failed.$([environment]::Newline) $($_.Exception.Message)"
+    OutputError -message "CreateDevelopmentEnvironment action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
     TrackException -telemetryScope $telemetryScope -errorRecord $_
 }
 finally {

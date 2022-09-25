@@ -14,9 +14,9 @@ inputs:
     required: false
     default: '{}'
   projects:
-    description: Projects to deploy (default is all)
+    description: Projects to deploy
     required: false
-    default: '*'
+    default: ''
   environmentName:
     description: Name of environment to deploy to
     required: true
@@ -30,8 +30,17 @@ inputs:
 runs:
   using: composite
   steps:
-    - run: try { ${{ github.action_path }}/Deploy.ps1 -actor '${{ inputs.actor }}' -token '${{ inputs.token }}' -parentTelemetryScopeJson '${{ inputs.parentTelemetryScopeJson }}' -projects '${{ inputs.projects }}' -environmentName '${{ inputs.environmentName }}' -artifacts '${{ inputs.artifacts }}' -type '${{ inputs.type }}' } catch { Write-Host "::Error::Unexpected error when running action ($($_.Exception.Message))"; exit 1 }
+    - name: run
       shell: PowerShell
+      env:
+        _actor: ${{ inputs.actor }}
+        _token: ${{ inputs.token }}
+        _parentTelemetryScopeJson: ${{ inputs.parentTelemetryScopeJson }}
+        _projects: ${{ inputs.projects }}
+        _environmentName: ${{ inputs.environmentName }}
+        _artifacts: ${{ inputs.artifacts }}
+        _type: ${{ inputs.type }}
+      run: try { ${{ github.action_path }}/Deploy.ps1 -actor $ENV:_actor -token $ENV:_token -parentTelemetryScopeJson $ENV:_parentTelemetryScopeJson -projects $ENV:_projects -environmentName $ENV:_environmentName -artifacts $ENV:_artifacts -type $ENV:_type } catch { Write-Host "::Error::Unexpected error when running action ($($_.Exception.Message.Replace("`r",'').Replace("`n",' ')))"; exit 1 }
 branding:
   icon: terminal
   color: blue
