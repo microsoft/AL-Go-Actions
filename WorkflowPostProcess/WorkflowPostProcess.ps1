@@ -19,9 +19,8 @@ try {
 
     if ($telemetryScopeJson -and $telemetryScopeJson -ne "{}") {
         $telemetryScope = RegisterTelemetryScope $telemetryScopeJson
+        TrackTrace -telemetryScope $telemetryScope
     }
-
-    TrackTrace -telemetryScope $telemetryScope
 }
 catch {
     OutputError -message "WorkflowPostProcess action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
