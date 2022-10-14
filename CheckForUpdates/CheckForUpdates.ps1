@@ -4,13 +4,15 @@ Param(
     [Parameter(HelpMessage = "The GitHub token running the action", Mandatory = $false)]
     [string] $token,
     [Parameter(HelpMessage = "Specifies the parent telemetry scope for the telemetry signal", Mandatory = $false)]
-    [string] $parentTelemetryScopeJson = '{}',
+    [string] $parentTelemetryScopeJson = '7b7d',
     [Parameter(HelpMessage = "URL of the template repository (default is the template repository used to create the repository)", Mandatory = $false)]
     [string] $templateUrl = "",
     [Parameter(HelpMessage = "Branch in template repository to use for the update (default is the default branch)", Mandatory = $false)]
     [string] $templateBranch = "",
     [Parameter(HelpMessage = "Set this input to Y in order to update AL-Go System Files if needed", Mandatory = $false)]
     [bool] $update,
+    [Parameter(HelpMessage = "Set the branch to update", Mandatory = $false)]
+    [string] $updateBranch,
     [Parameter(HelpMessage = "Direct Commit (Y/N)", Mandatory = $false)]
     [bool] $directCommit    
 )
@@ -213,7 +215,7 @@ try {
             AddTelemetryProperty -telemetryScope $telemetryScope -key "updatesExists" -value $true
         }
         else {
-            Write-Host "Your repository runs on the latest version of AL-Go System."
+            Write-Host "No updates available for AL-Go for GitHub."
             AddTelemetryProperty -telemetryScope $telemetryScope -key "updatesExists" -value $false
         }
     }
@@ -321,7 +323,7 @@ try {
                     }
                     else {
                         invoke-git push -u $url $branch
-                        invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY --body "$releaseNotes"
+                        invoke-gh pr create --fill --head $branch --base $updateBranch --repo $env:GITHUB_REPOSITORY --body "$releaseNotes"
                     }
                 }
                 else {
@@ -338,7 +340,7 @@ try {
             }
         }
         else {
-            OutputWarning "Your repository runs on the latest version of AL-Go System."
+            OutputWarning "No updates available for AL-Go for GitHub."
         }
     }
 
