@@ -7,7 +7,7 @@ inputs:
   telemetryScopeJson:
     description: Telemetry scope generated during the workflow initialization
     required: false
-    default: '{}'
+    default: '7b7d'
 runs:
   using: composite
   steps:

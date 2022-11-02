@@ -4,13 +4,15 @@ Param(
     [Parameter(HelpMessage = "The GitHub token running the action", Mandatory = $false)]
     [string] $token,
     [Parameter(HelpMessage = "Specifies the parent telemetry scope for the telemetry signal", Mandatory = $false)]
-    [string] $parentTelemetryScopeJson = '{}',
+    [string] $parentTelemetryScopeJson = '7b7d',
     [Parameter(HelpMessage = "URL of the template repository (default is the template repository used to create the repository)", Mandatory = $false)]
     [string] $templateUrl = "",
     [Parameter(HelpMessage = "Branch in template repository to use for the update (default is the default branch)", Mandatory = $false)]
     [string] $templateBranch = "",
     [Parameter(HelpMessage = "Set this input to Y in order to update AL-Go System Files if needed", Mandatory = $false)]
     [bool] $update,
+    [Parameter(HelpMessage = "Set the branch to update", Mandatory = $false)]
+    [string] $updateBranch,
     [Parameter(HelpMessage = "Direct Commit (Y/N)", Mandatory = $false)]
     [bool] $directCommit    
 )
@@ -24,6 +26,8 @@ $bcContainerHelperPath = $null
 
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
+    . (Join-Path -Path $PSScriptRoot -ChildPath "yamlclass.ps1")
+
     $baseFolder = $ENV:GITHUB_WORKSPACE
     $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $baseFolder
 
@@ -126,6 +130,21 @@ try {
     }
     $updateFiles = @()
 
+    $depth = 1
+    if ($repoSettings.ContainsKey('useProjectDependencies') -and $repoSettings.useProjectDependencies) {
+        if ($repoSettings.ContainsKey('Projects')) {
+            $projects = $repoSettings.projects
+        }
+        else {
+            $projects = @(Get-ChildItem -Path $ENV:GITHUB_WORKSPACE -Directory -Recurse -Depth 2 | Where-Object { Test-Path (Join-Path $_.FullName '.AL-Go\Settings.json') -PathType Leaf } | ForEach-Object { $_.FullName.Substring("$ENV:GITHUB_WORKSPACE".length+1) })
+        }
+        $buildAlso = @{}
+        $buildOrder = @{}
+        $projectDependencies = @{}
+        AnalyzeProjectDependencies -basePath $ENV:GITHUB_WORKSPACE -projects $projects -buildOrder ([ref]$buildOrder) -buildAlso ([ref]$buildAlso) -projectDependencies ([ref]$projectDependencies)
+        $depth = $buildOrder.Count
+    }
+
     $checkfiles | ForEach-Object {
         $type = $_.type
         $srcPath = $_.srcPath
@@ -136,58 +155,99 @@ try {
             $srcFile = $_.FullName
             $fileName = $_.Name
             $baseName = $_.BaseName
-            $srcContent = (Get-Content -Path $srcFile -Encoding UTF8 -Raw).Replace("`r", "").TrimEnd("`n").Replace("`n", "`r`n")
             $name = $type
             if ($type -eq "workflow") {
-                $srcContent.Split("`n") | Where-Object { $_ -like "name:*" } | Select-Object -First 1 | ForEach-Object {
-                    if ($_ -match '^name:([^#]*)(#.*$|$)') { $name = "workflow '$($Matches[1].Trim())'" }
+                $yaml = [Yaml]::Load($srcFile)
+                $name = "$type $($yaml.get('name:').content[0].SubString(5).trim())"
+
+                if ($baseName -ne "PullRequestHandler") {
+                    $workflowScheduleKey = "$($baseName)Schedule"
+                    if ($repoSettings.ContainsKey($workflowScheduleKey)) {
+                        $yamlOn = $yaml.Get('on:/')
+                        $yaml.Replace('on:/', $yamlOn.content+@('schedule:', "  - cron: '$($repoSettings."$workflowScheduleKey")'"))
+                    }
                 }
+
+                if ($baseName -eq "CICD") {
+                    if ($repoSettings.ContainsKey('CICDPushBranches')) {
+                        $CICDPushBranches = $repoSettings.CICDPushBranches
+                    }
+                    elseif ($repoSettings.ContainsKey($workflowScheduleKey)) {
+                        $CICDPushBranches = ''
+                    }
+                    else {
+                        $CICDPushBranches = $defaultCICDPushBranches
+                    }
+                    if ($CICDPushBranches) {
+                        $yaml.Replace('on:/push:/branches:', "branches: [ '$($cicdPushBranches -join "', '")' ]")
+                    }
+                    else {
+                        $yaml.Replace('on:/push:',@())
+                    }
+                }
+
+                if ($baseName -eq "PullRequestHandler") {
+                    if ($repoSettings.ContainsKey('CICDPullRequestBranches')) {
+                        $CICDPullRequestBranches = $repoSettings.CICDPullRequestBranches
+                    }
+                    else {
+                        $CICDPullRequestBranches = $defaultCICDPullRequestBranches
+                    }
+                    $yaml.Replace('on:/pull_request:/branches:', "branches: [ '$($cicdPullRequestBranches -join "', '")' ]")
+                }
+
+                if ($baseName -ne "UpdateGitHubGoSystemFiles" -and $baseName -ne "PullRequestHandler") {
+                    if ($repoSettings.ContainsKey("runs-on")) {
+                        $yaml.ReplaceAll('runs-on: [ windows-latest ]', "runs-on: [ $($repoSettings."runs-on") ]")
+                    }
+                }
+
+                if ($baseName -eq 'CICD' -or $baseName -eq 'Current' -or $baseName -eq 'NextMinor' -or $baseName -eq 'NextMajor') {
+                    $yaml.Replace('jobs:/Initialization:/env:/workflowDepth:',"workflowDepth: $depth")
+                    if ($depth -gt 1) {
+                        $initializationOutputs = $yaml.Get('jobs:/Initialization:/outputs:/')
+                        $addOutput = @()
+                        1..$depth | ForEach-Object {
+                            $addOutput += @(
+                              "projects$($_): `${{ steps.BuildOrder.outputs.Projects$($_)Json }}"
+                              "projects$($_)Count: `${{ steps.BuildOrder.outputs.Projects$($_)Count }}"
+                            )
+                        }
+                        $yaml.Replace('jobs:/Initialization:/outputs:/', $initializationOutputs.content+$addOutput)
+
+                        $newBuild = @()
+                        $build = $yaml.Get('jobs:/Build:/')
+                        1..$depth | ForEach-Object {
+                            if ($_ -eq 1) {
+                                $needs = @('Initialization')
+                                $if = "if: needs.Initialization.outputs.projects$($_)Count > 0"
+                            }
+                            else {
+                                $newBuild += @('')
+                                $needs = @('Initialization',"Build$($_-1)")
+                                $if = "if: always() && (!cancelled()) && (needs.Build$($_-1).result == 'success' || needs.Build$($_-1).result == 'skipped') && needs.Initialization.outputs.projects$($_)Count > 0"
+                            }
+                            if ($depth -eq $_) {
+                                $newBuild += @("Build:")
+                            }
+                            else {
+                                $newBuild += @("Build$($_):")
+                            }
+                            $build.Replace('if:', $if)
+                            $build.Replace('needs:', "needs: [ $($needs -join ', ') ]")
+                            $build.Replace('strategy:/matrix:/project:',"project: `${{ fromJson(needs.Initialization.outputs.projects$($_)) }}")
+                        
+                            $build.content | ForEach-Object { $newBuild += @("  $_") }
+                        }
+                        $yaml.Replace('jobs:/Build:', $newBuild)
+                    }
+                }
+                $srcContent = $yaml.content -join "`r`n"
+            }
+            else {
+                $srcContent = (Get-Content -Path $srcFile -Encoding UTF8 -Raw).Replace("`r", "").TrimEnd("`n").Replace("`n", "`r`n")
             }
 
-            $workflowScheduleKey = "$($baseName)Schedule"
-            if ($repoSettings.ContainsKey($workflowScheduleKey)) {
-                $srcPattern = "on:`r`n  workflow_dispatch:`r`n"
-                $replacePattern = "on:`r`n  schedule:`r`n  - cron: '$($repoSettings."$workflowScheduleKey")'`r`n  workflow_dispatch:`r`n"
-                $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
-            }
-
-            if ($baseName -eq "CICD") {
-                $srcPattern = "  push:`r`n    paths-ignore:`r`n      - 'README.md'`r`n      - '.github/**'`r`n    branches: [ '$($defaultCICDPushBranches -join ''', ''')' ]`r`n  pull_request:`r`n    paths-ignore:`r`n      - 'README.md'`r`n      - '.github/**'`r`n    branches: [ '$($defaultCICDPullRequestBranches -join ''', ''')' ]`r`n"
-                $replacePattern = ''
-                if ($repoSettings.ContainsKey('CICDPushBranches')) {
-                    $CICDPushBranches = $repoSettings.CICDPushBranches
-                }
-                elseif ($repoSettings.ContainsKey($workflowScheduleKey)) {
-                    $CICDPushBranches = ''
-                }
-                else {
-                    $CICDPushBranches = $defaultCICDPushBranches
-                }
-                if ($CICDPushBranches) {
-                    $replacePattern += "  push:`r`n    paths-ignore:`r`n      - 'README.md'`r`n      - '.github/**'`r`n    branches: [ '$($CICDPushBranches -join ''', ''')' ]`r`n"
-                }
-                if ($repoSettings.ContainsKey('CICDPullRequestBranches')) {
-                    $CICDPullRequestBranches = $repoSettings.CICDPullRequestBranches
-                }
-                elseif ($repoSettings.ContainsKey($workflowScheduleKey)) {
-                    $CICDPullRequestBranches = ''
-                }
-                else {
-                    $CICDPullRequestBranches = $defaultCICDPullRequestBranches
-                }
-                if ($CICDPullRequestBranches) {
-                    $replacePattern += "  pull_request:`r`n    paths-ignore:`r`n      - 'README.md'`r`n      - '.github/**'`r`n    branches: [ '$($CICDPullRequestBranches -join ''', ''')' ]`r`n"
-                }
-                $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
-            }
-            
-            if ($baseName -ne "UpdateGitHubGoSystemFiles") {
-                if ($repoSettings.ContainsKey("runs-on")) {
-                    $srcPattern = "runs-on: [ windows-latest ]`r`n"
-                    $replacePattern = "runs-on: [ $($repoSettings."runs-on") ]`r`n"
-                    $srcContent = $srcContent.Replace($srcPattern, $replacePattern)
-                }
-            }
                 
             $dstFile = Join-Path $dstFolder $fileName
             if (Test-Path -Path $dstFile -PathType Leaf) {
@@ -213,7 +273,7 @@ try {
             AddTelemetryProperty -telemetryScope $telemetryScope -key "updatesExists" -value $true
         }
         else {
-            Write-Host "Your repository runs on the latest version of AL-Go System."
+            Write-Host "No updates available for AL-Go for GitHub."
             AddTelemetryProperty -telemetryScope $telemetryScope -key "updatesExists" -value $false
         }
     }
@@ -321,7 +381,7 @@ try {
                     }
                     else {
                         invoke-git push -u $url $branch
-                        invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY --body "$releaseNotes"
+                        invoke-gh pr create --fill --head $branch --base $updateBranch --repo $env:GITHUB_REPOSITORY --body "$releaseNotes"
                     }
                 }
                 else {
@@ -338,7 +398,7 @@ try {
             }
         }
         else {
-            OutputWarning "Your repository runs on the latest version of AL-Go System."
+            OutputWarning "No updates available for AL-Go for GitHub."
         }
     }
 

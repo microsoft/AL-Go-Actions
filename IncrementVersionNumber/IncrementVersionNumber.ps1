@@ -4,7 +4,7 @@ Param(
     [Parameter(HelpMessage = "The GitHub token running the action", Mandatory = $false)]
     [string] $token,
     [Parameter(HelpMessage = "Specifies the parent telemetry scope for the telemetry signal", Mandatory = $false)]
-    [string] $parentTelemetryScopeJson = '{}',
+    [string] $parentTelemetryScopeJson = '7b7d',
     [Parameter(HelpMessage = "Project name if the repository is setup for multiple projects (* for all projects)", Mandatory = $false)]
     [string] $project = '*',
     [Parameter(HelpMessage = "Updated Version Number. Use Major.Minor for absolute change, use +Major.Minor for incremental change.", Mandatory = $true)]
@@ -44,7 +44,7 @@ try {
     if (!$project) { $project = '*' }
 
     if ($project -ne '.') {
-        $projects = @(Get-ChildItem -Path $ENV:GITHUB_WORKSPACE -Directory -Recurse -Depth 2 | Where-Object { Test-Path (Join-Path $_.FullName ".AL-Go") -PathType Container } | ForEach-Object { $_.FullName.Substring("$ENV:GITHUB_WORKSPACE".length+1) } | Where-Object { $_ -like $project })
+        $projects = @(Get-ChildItem -Path $ENV:GITHUB_WORKSPACE -Directory -Recurse -Depth 2 | Where-Object { Test-Path (Join-Path $_.FullName '.AL-Go\Settings.json') -PathType Leaf } | ForEach-Object { $_.FullName.Substring("$ENV:GITHUB_WORKSPACE".length+1) } | Where-Object { $_ -like $project })
         if ($projects.Count -eq 0) {
             if ($project -eq '*') {
                 $projects = @( '.' )

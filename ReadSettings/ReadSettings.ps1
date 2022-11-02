@@ -4,7 +4,7 @@ Param(
     [Parameter(HelpMessage = "The GitHub token running the action", Mandatory = $false)]
     [string] $token,
     [Parameter(HelpMessage = "Specifies the parent telemetry scope for the telemetry signal", Mandatory = $false)]
-    [string] $parentTelemetryScopeJson = '{}',
+    [string] $parentTelemetryScopeJson = '7b7d',
     [Parameter(HelpMessage = "Project folder", Mandatory = $false)]
     [string] $project = ".",
     [Parameter(HelpMessage = "Indicates whether you want to retrieve the list of project list as well", Mandatory = $false)]
@@ -88,21 +88,22 @@ try {
     }
 
     $outSettingsJson = $outSettings | ConvertTo-Json -Compress
-    Write-Host "::set-output name=SettingsJson::$outSettingsJson"
-    Write-Host "set-output name=SettingsJson::$outSettingsJson"
+    Add-Content -Path $env:GITHUB_OUTPUT -Value "SettingsJson=$outSettingsJson"
     Add-Content -Path $env:GITHUB_ENV -Value "Settings=$OutSettingsJson"
+    Write-Host "SettingsJson=$outSettingsJson"
 
     $gitHubRunner = $settings.githubRunner.Split(',').Trim() | ConvertTo-Json -compress
-    Write-Host "::set-output name=GitHubRunnerJson::$githubRunner"
-    Write-Host "set-output name=GitHubRunnerJson::$githubRunner"
+    Add-Content -Path $env:GITHUB_OUTPUT -Value "GitHubRunnerJson=$githubRunner"
+    Write-Host "GitHubRunnerJson=$githubRunner"
 
     if ($getprojects) {
+
         $buildProjects = @()
         if ($settings.Projects) {
             $projects = $settings.projects
         }
         else {
-            $projects = @(Get-ChildItem -Path $ENV:GITHUB_WORKSPACE -Directory -Recurse -Depth 2 | Where-Object { Test-Path (Join-Path $_.FullName ".AL-Go") -PathType Container } | ForEach-Object { $_.FullName.Substring("$ENV:GITHUB_WORKSPACE".length+1) })
+            $projects = @(Get-ChildItem -Path $ENV:GITHUB_WORKSPACE -Directory -Recurse -Depth 2 | Where-Object { Test-Path (Join-Path $_.FullName '.AL-Go\Settings.json') -PathType Leaf } | ForEach-Object { $_.FullName.Substring("$ENV:GITHUB_WORKSPACE".length+1) })
         }
         if ($projects) {
             Write-Host "All Projects: $($projects -join ', ')"
@@ -130,10 +131,11 @@ try {
                     $buildProjects = @($projects | Where-Object {
                         $project = $_
                         $buildProject = $false
-                        $projectFolders = Get-ProjectFolders -baseFolder $ENV:GITHUB_WORKSPACE -project $project -token $token -includeAlGoFolder -includeApps -includeTestApps
-                        $projectFolders | Out-Host
-                        $projectFolders | ForEach-Object {
-                            if ($filesChanged -like "$_/*") { $buildProject = $true }
+                        if (Test-Path -path (Join-Path $ENV:GITHUB_WORKSPACE "$project\.AL-Go\Settings.json")) {
+                            $projectFolders = Get-ProjectFolders -baseFolder $ENV:GITHUB_WORKSPACE -project $project -token $token -includeAlGoFolder -includeApps -includeTestApps
+                            $projectFolders | ForEach-Object {
+                                if ($filesChanged -like "$_/*") { $buildProject = $true }
+                            }
                         }
                         $buildProject
                     })
@@ -142,6 +144,22 @@ try {
             }
             else {
                 $buildProjects = $projects
+            }
+            if ($settings.useProjectDependencies) {
+                $buildAlso = @{}
+                $buildOrder = @{}
+                $projectDependencies = @{}
+                AnalyzeProjectDependencies -basePath $ENV:GITHUB_WORKSPACE -projects $projects -buildOrder ([ref]$buildOrder) -buildAlso ([ref]$buildAlso) -projectDependencies ([ref]$projectDependencies)
+                $buildProjects = @($buildProjects | ForEach-Object { $_; if ($buildAlso.ContainsKey("$_")) { $buildAlso."$_" } } | Select-Object -Unique)
+                Write-Host "Building projects: $($buildProjects -join ', ')"
+                $projectDependenciesJson = $projectDependencies | ConvertTo-Json -Compress
+                $buildOrderJson = $buildOrder | ConvertTo-Json -Compress
+                Add-Content -Path $env:GITHUB_OUTPUT -Value "ProjectDependenciesJson=$projectDependenciesJson"
+                Add-Content -Path $env:GITHUB_OUTPUT -Value "BuildOrderJson=$buildOrderJson"
+                Add-Content -Path $env:GITHUB_OUTPUT -Value "BuildOrderDepth=$($buildOrder.Count)"
+                Write-Host "ProjectDependenciesJson=$projectDependenciesJson"
+                Write-Host "BuildOrderJson=$buildOrderJson"
+                Write-Host "BuildOrderDepth=$($buildOrder.Count)"
             }
         }
         if (Test-Path ".AL-Go" -PathType Container) {
@@ -153,11 +171,11 @@ try {
         else {
             $projectsJSon = $buildProjects | ConvertTo-Json -compress
         }
-        Write-Host "::set-output name=ProjectsJson::$projectsJson"
-        Write-Host "set-output name=ProjectsJson::$projectsJson"
-        Write-Host "::set-output name=ProjectCount::$($buildProjects.Count)"
-        Write-Host "set-output name=ProjectCount::$($buildProjects.Count)"
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "ProjectsJson=$projectsJson"
         Add-Content -Path $env:GITHUB_ENV -Value "Projects=$projectsJson"
+        Write-Host "ProjectsJson=$projectsJson"
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "ProjectCount=$($buildProjects.Count)"
+        Write-Host "ProjectCount=$($buildProjects.Count)"
     }
 
     if ($getenvironments) {
@@ -190,11 +208,11 @@ try {
             $json.matrix.include += @{ "environment" = $_; "os" = "$($os | ConvertTo-Json -compress)" }
         }
         $environmentsJson = $json | ConvertTo-Json -Depth 99 -compress
-        Write-Host "::set-output name=EnvironmentsJson::$environmentsJson"
-        Write-Host "set-output name=EnvironmentsJson::$environmentsJson"
-        Write-Host "::set-output name=EnvironmentCount::$($environments.Count)"
-        Write-Host "set-output name=EnvironmentCount::$($environments.Count)"
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "EnvironmentsJson=$environmentsJson"
         Add-Content -Path $env:GITHUB_ENV -Value "Environments=$environmentsJson"
+        Write-Host "EnvironmentsJson=$environmentsJson"
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "EnvironmentCount=$($environments.Count)"
+        Write-Host "EnvironmentCount=$($environments.Count)"
     }
 
     TrackTrace -telemetryScope $telemetryScope

@@ -4,9 +4,11 @@ Param(
     [Parameter(HelpMessage = "The GitHub token running the action", Mandatory = $false)]
     [string] $token,
     [Parameter(HelpMessage = "Specifies the parent telemetry scope for the telemetry signal", Mandatory = $false)]
-    [string] $parentTelemetryScopeJson = '{}',
+    [string] $parentTelemetryScopeJson = '7b7d',
     [Parameter(HelpMessage = "Project folder", Mandatory = $false)]
     [string] $project = "",
+    [Parameter(HelpMessage = "Project Dependencies in compressed Json format", Mandatory = $false)]
+    [string] $projectDependenciesJson = "",
     [Parameter(HelpMessage = "Settings from repository in compressed Json format", Mandatory = $false)]
     [string] $settingsJson = '{"AppBuild":"", "AppRevision":""}',
     [Parameter(HelpMessage = "Secrets from repository in compressed Json format", Mandatory = $false)]
@@ -57,14 +59,14 @@ try {
     if ($project) {
         $sharedFolder = $baseFolder
     }
-    $workflowName = $env:GITHUB_WORKFLOW
+    $workflowName = "$env:GITHUB_WORKFLOW".Trim()
 
     Write-Host "use settings and secrets"
     $settings = $settingsJson | ConvertFrom-Json | ConvertTo-HashTable
     $secrets = $secretsJson | ConvertFrom-Json | ConvertTo-HashTable
     $appBuild = $settings.appBuild
     $appRevision = $settings.appRevision
-    'licenseFileUrl','insiderSasToken','CodeSignCertificateUrl','CodeSignCertificatePassword','KeyVaultCertificateUrl','KeyVaultCertificatePassword','KeyVaultClientId','StorageContext','ApplicationInsightsConnectionString' | ForEach-Object {
+    'licenseFileUrl','insiderSasToken','CodeSignCertificateUrl','CodeSignCertificatePassword','KeyVaultCertificateUrl','KeyVaultCertificatePassword','KeyVaultClientId','StorageContext','GitHubPackagesContext','ApplicationInsightsConnectionString' | ForEach-Object {
         if ($secrets.ContainsKey($_)) {
             $value = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets."$_"))
         }
@@ -91,15 +93,52 @@ try {
     $installApps = $repo.installApps
     $installTestApps = $repo.installTestApps
 
+    Write-Host "Project: $project"
+    if ($project -and $repo.useProjectDependencies -and $projectDependenciesJson -ne "") {
+        $projectDependencies = $projectDependenciesJson | ConvertFrom-Json | ConvertTo-HashTable
+        if ($projectDependencies.ContainsKey($project)) {
+            $projects = @($projectDependencies."$project") -join ","
+        }
+        else {
+            $projects = ''
+        }
+        if ($projects) {
+            Write-Host "Project dependencies: $projects"
+            $thisBuildProbingPaths = @(@{
+                "release_status" = "thisBuild"
+                "version" = "latest"
+                "projects" = $projects
+                "repo" = "$ENV:GITHUB_SERVER_URL/$ENV:GITHUB_REPOSITORY"
+                "branch" = $ENV:GITHUB_REF_NAME
+                "authTokenSecret" = $token
+            })
+            Get-dependencies -probingPathsJson $thisBuildProbingPaths | where-Object { $_ } | ForEach-Object {
+                if ($_.startswith('(')) {
+                    $installTestApps += $_    
+                }
+                else {
+                    $installApps += $_    
+                }
+            }
+        }
+        else {
+            Write-Host "No project dependencies"
+        }
+    }
+
     if ($repo.appDependencyProbingPaths) {
         Write-Host "::group::Downloading dependencies"
-        $installApps += Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths -mask "Apps"
-        Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths -mask "TestApps" | ForEach-Object {
-            $installTestApps += "($_)"
+        Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths | ForEach-Object {
+            if ($_.startswith('(')) {
+                $installTestApps += $_    
+            }
+            else {
+                $installApps += $_    
+            }
         }
         Write-Host "::endgroup::"
     }
-    
+
     # Analyze app.json version dependencies before launching pipeline
 
     # Analyze InstallApps and InstallTestApps before launching pipeline
@@ -259,7 +298,32 @@ try {
             }
         }
     }
-    
+
+    if ($gitHubPackagesContext -and (-not $runAlPipelineParams.ContainsKey('InstallMissingDependencies'))) {
+        $gitHubPackagesCredential = $gitHubPackagesContext | ConvertFrom-Json
+        $runAlPipelineParams += @{
+            "InstallMissingDependencies" = {
+                Param([Hashtable]$parameters)
+                $parameters.missingDependencies | ForEach-Object {
+                    $publishParams = @{
+                        "containerName" = $parameters.containerName
+                        "tenant" = $parameters.tenant
+                    }
+                    $appid = $_.Split(':')[0]
+                    $appName = $_.Split(':')[1]
+                    $version = $appName.SubString($appName.LastIndexOf('_')+1)
+                    $version = [System.Version]$version.SubString(0,$version.Length-4)
+                    if ($parameters.ContainsKey('CopyInstalledAppsToFolder')) {
+                        $publishParams += @{
+                            "CopyInstalledAppsToFolder" = $parameters.CopyInstalledAppsToFolder
+                        }
+                    }
+                    Publish-BcNuGetPackageToContainer @publishParams -nuGetServerUrl $gitHubPackagesCredential.serverUrl -nuGetToken $gitHubPackagesCredential.token -PackageName "AL-Go-$appId" -version $version -skipVerification
+                }
+            }
+        }
+    }
+
     "doNotBuildTests",
     "doNotRunTests",
     "doNotRunBcptTests",
@@ -303,6 +367,7 @@ try {
         -customCodeCops $repo.customCodeCops `
         -gitHubActions `
         -failOn $repo.failOn `
+        -treatTestFailuresAsWarnings:$repo.treatTestFailuresAsWarnings `
         -rulesetFile $repo.rulesetFile `
         -AppSourceCopMandatoryAffixes $repo.appSourceCopMandatoryAffixes `
         -additionalCountries $additionalCountries `
