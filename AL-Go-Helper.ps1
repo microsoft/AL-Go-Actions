@@ -244,7 +244,7 @@ function DownloadAndImportBcContainerHelper {
             Write-Host "Downloading BcContainerHelper developer version"
             $webclient.DownloadFile("https://github.com/microsoft/navcontainerhelper/archive/dev.zip", "$tempName.zip")
         }
-        elseif ($BcContainerHelperVersion -eq "preview") {
+        elseif ($BcContainerHelperVersion -eq "latest") {
             Write-Host "Downloading BcContainerHelper $BcContainerHelperVersion version from Blob Storage"
             $webclient.DownloadFile("https://bccontainerhelper.blob.core.windows.net/public/$($BcContainerHelperVersion).zip", "$tempName.zip")        
         }
