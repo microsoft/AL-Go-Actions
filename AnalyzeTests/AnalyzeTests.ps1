@@ -28,7 +28,7 @@ try {
     $testResultsFile = Join-Path $ENV:GITHUB_WORKSPACE "$project\TestResults.xml"
     if (Test-Path $testResultsFile) {
         $testResults = [xml](Get-Content "$project\TestResults.xml")
-        $testResultSummary = GetTestResultSummary -testResults $testResults -includeFailures 6
+        $testResultSummary = GetTestResultSummary -testResults $testResults -includeFailures 50
 
         Add-Content -Path $env:GITHUB_OUTPUT -Value "TestResultMD=$testResultSummary"
         Write-Host "TestResultMD=$testResultSummary"
