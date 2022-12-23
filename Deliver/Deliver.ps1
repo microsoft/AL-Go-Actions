@@ -25,13 +25,35 @@ Set-StrictMode -Version 2.0
 $telemetryScope = $null
 $bcContainerHelperPath = $null
 
+function EnsureAzStorageModule() {
+    if (get-command New-AzStorageContext -ErrorAction SilentlyContinue) {
+        Write-Host "Using Az.Storage PowerShell module"
+    }
+    else {
+        $azureStorageModule = Get-Module -name 'Azure.Storage' -ListAvailable | Select-Object -First 1
+        if ($azureStorageModule) {
+            Write-Host "Azure.Storage Module is available in version $($azureStorageModule.Version)"
+            Write-Host "Using Azure.Storage version $($azureStorageModule.Version)"
+            Import-Module  'Azure.Storage' -DisableNameChecking -WarningAction SilentlyContinue | Out-Null
+            Set-Alias -Name New-AzStorageContext -Value New-AzureStorageContext -Scope Script
+            Set-Alias -Name Get-AzStorageContainer -Value Get-AzureStorageContainer -Scope Script
+            Set-Alias -Name Set-AzStorageBlobContent -Value Set-AzureStorageBlobContent -Scope Script
+        }
+        else {
+            Write-Host "Installing and importing Az.Storage." 
+            Install-Module 'Az.Storage' -Force
+            Import-Module  'Az.Storage' -DisableNameChecking -WarningAction SilentlyContinue | Out-Null
+        }
+    }
+}
+
 # IMPORTANT: No code that can fail should be outside the try/catch
 
 try {
-    . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
+    . (Join-Path -Path $PSScriptRoot -ChildPath "../AL-Go-Helper.ps1" -Resolve)
     $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $ENV:GITHUB_WORKSPACE
 
-    import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
+    import-module (Join-Path -path $PSScriptRoot -ChildPath "../TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0081' -parentTelemetryScopeJson $parentTelemetryScopeJson
 
     $refname = "$ENV:GITHUB_REF_NAME".Replace('/','_')
@@ -41,12 +63,15 @@ try {
         $projects = ($projects | ConvertFrom-Json) -join ","
     }
 
+    $artifacts = $artifacts.Replace('/',([System.IO.Path]::DirectorySeparatorChar)).Replace('\',([System.IO.Path]::DirectorySeparatorChar))
+
     $settings = ReadSettings -baseFolder $ENV:GITHUB_WORKSPACE -workflowName $env:GITHUB_WORKFLOW
-    if ($settings.Projects) {
+    if ($settings.projects) {
         $projectList = $settings.projects | Where-Object { $_ -like $projects }
     }
     else {
-        $projectList = @(Get-ChildItem -Path $ENV:GITHUB_WORKSPACE -Directory -Recurse -Depth 2 | Where-Object { Test-Path (Join-Path $_.FullName '.AL-Go\Settings.json') -PathType Leaf } | ForEach-Object { $_.FullName.Substring("$ENV:GITHUB_WORKSPACE".length+1) })
+        Get-ChildItem -Path $ENV:GITHUB_WORKSPACE -Recurse -Depth 2 | Where-Object { $_.PSIsContainer } | ForEach-Object { Write-Host $_.FullName }
+        $projectList = @(Get-ChildItem -Path $ENV:GITHUB_WORKSPACE -Recurse -Depth 2 | Where-Object { $_.PSIsContainer -and (Test-Path (Join-Path $_.FullName ".AL-Go/settings.json") -PathType Leaf) } | ForEach-Object { $_.FullName.Substring("$ENV:GITHUB_WORKSPACE".length+1) })
         if (Test-Path (Join-Path $ENV:GITHUB_WORKSPACE ".AL-Go") -PathType Container) {
             $projectList += @(".")
         }
@@ -77,14 +102,17 @@ try {
             $project = $thisProject
         }
         else {
-            $project = $env:RepoName
+            $project = $env:repoName
         }
         $projectName = $project -replace "[^a-z0-9]", "-"
         Write-Host "Project '$project'"
         $baseFolder = Join-Path $ENV:GITHUB_WORKSPACE ".artifacts"
         $baseFolderCreated = $false
 
-        if ($artifacts -like "$($ENV:GITHUB_WORKSPACE)*") {
+        if ($artifacts -eq '.artifacts') {
+            # Base folder is set
+        }
+        elseif ($artifacts -like "$($ENV:GITHUB_WORKSPACE)*") {
             $baseFolder = $artifacts
         }
         elseif ($artifacts -eq "current" -or $artifacts -eq "prerelease" -or $artifacts -eq "draft") {
@@ -151,9 +179,13 @@ try {
             Write-Host "- $($_.Name)"
         }
 
-        $customScript = Join-Path $ENV:GITHUB_WORKSPACE ".github\DeliverTo$deliveryTarget.ps1" 
+        # Check if there is a custom script to run for the delivery target
+        $customScript = Join-Path $ENV:GITHUB_WORKSPACE ".github/DeliverTo$deliveryTarget.ps1"
+
         if (Test-Path $customScript -PathType Leaf) {
-            $projectSettings = Get-Content -Path (Join-Path $ENV:GITHUB_WORKSPACE "$thisProject\.AL-Go\settings.json") | ConvertFrom-Json | ConvertTo-HashTable -Recurse
+            Write-Host "Found custom script $customScript for delivery target $deliveryTarget"
+            
+            $projectSettings = Get-Content -Path (Join-Path $ENV:GITHUB_WORKSPACE "$thisProject/.AL-Go/settings.json") | ConvertFrom-Json | ConvertTo-HashTable -Recurse
             $parameters = @{
                 "Project" = $thisProject
                 "ProjectName" = $projectName
@@ -162,44 +194,47 @@ try {
                 "RepoSettings" = $settings
                 "ProjectSettings" = $projectSettings
             }
+            #Calculate the folders per artifact type
+            
+            #Calculate the folders per artifact type
+            'Apps', 'TestApps', 'Dependencies' | ForEach-Object {
+                $artifactType = $_
+                $singleArtifactFilter = "*-$refname-$artifactType-*.*.*.*";
 
-            $appsfolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-Apps-*.*.*.*") -Directory)
-            if ($appsFolder.Count -eq 0) {
-                throw "Internal error - unable to locate apps folder"
+                # Get the folder holding the artifacts from the standard build
+                $artifactFolder =  @(Get-ChildItem -Path (Join-Path $baseFolder $singleArtifactFilter) -Directory)
+
+                # Verify that there is an apps folder
+                if ($artifactFolder.Count -eq 0 -and $artifactType -eq "Apps") {
+                    throw "Internal error - unable to locate apps folder"
+                }
+
+                # Verify that there is only at most one artifact folder for the standard build
+                if ($artifactFolder.Count -gt 1) {
+                    $artifactFolder | Out-Host
+                    throw "Internal error - multiple $artifactType folders located"
+                }
+
+                # Add the artifact folder to the parameters
+                if ($artifactFolder.Count -ne 0) {
+                    $parameters[$artifactType.ToLowerInvariant() + "Folder"] = $artifactFolder[0].FullName
+                }
+
+                # Get the folders holding the artifacts from all build modes
+                $multipleArtifactFilter = "*-$refname-*$artifactType-*.*.*.*";
+                $artifactFolders = @(Get-ChildItem -Path (Join-Path $baseFolder $multipleArtifactFilter) -Directory)
+                if ($artifactFolders.Count -gt 0) {
+                    $parameters[$artifactType.ToLowerInvariant() + "Folders"] = $artifactFolders.FullName
+                }
             }
-            if ($appsFolder.Count -gt 1) {
-                $appsFolder | Out-Host
-                throw "Internal error - multiple apps folders located"
-            }
-            $parameters.appsfolder = $appsfolder[0].FullName
-            $testAppsFolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-TestApps-*.*.*.*") -Directory)
-            if ($testAppsFolder.Count -gt 1) {
-                $testAppsFolder | Out-Host
-                throw "Internal error - multiple testApps folders located"
-            }
-            elseif ($testAppsFolder.Count -eq 1) {
-                $parameters.testAppsFolder = $testAppsFolder[0]
-            }
-            else {
-                $parameters.testAppsFolder = ""
-            }
-            $dependenciesFolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-Dependencies-*.*.*.*") -Directory)
-            if ($dependenciesFolder.Count -gt 1) {
-                $dependenciesFolder | Out-Host
-                throw "Internal error - multiple dependencies folders located"
-            }
-            elseif ($dependenciesFolder.Count -eq 1) {
-                $parameters.dependenciesFolder = $dependenciesFolder[0]
-            }
-            else {
-                $parameters.dependenciesFolder = ""
-            }
+            
+            Write-Host "Calling custom script: $customScript"
             . $customScript -parameters $parameters
         }
         elseif ($deliveryTarget -eq "GitHubPackages") {
             $githubPackagesCredential = $githubPackagesContext | ConvertFrom-Json
             'Apps' | ForEach-Object {
-                $folder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-$($_)-*.*.*.*") -Directory)
+                $folder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-$($_)-*.*.*.*") | Where-Object { $_.PSIsContainer })
                 if ($folder.Count -gt 1) {
                     $folder | Out-Host
                     throw "Internal error - multiple $_ folders located"
@@ -229,7 +264,7 @@ try {
             catch {
                 throw "NuGetContext secret is malformed. Needs to be formatted as Json, containing serverUrl and token as a minimum."
             }
-            $appsfolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-Apps-*.*.*.*") -Directory)
+            $appsfolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-Apps-*.*.*.*") | Where-Object { $_.PSIsContainer })
             if ($appsFolder.Count -eq 0) {
                 throw "Internal error - unable to locate apps folder"
             }
@@ -237,12 +272,12 @@ try {
                 $appsFolder | Out-Host
                 throw "Internal error - multiple apps folders located"
             }
-            $testAppsFolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-TestApps-*.*.*.*") -Directory)
+            $testAppsFolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-TestApps-*.*.*.*") | Where-Object { $_.PSIsContainer })
             if ($testAppsFolder.Count -gt 1) {
                 $testAppsFolder | Out-Host
                 throw "Internal error - multiple testApps folders located"
             }
-            $dependenciesFolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-Dependencies-*.*.*.*") -Directory)
+            $dependenciesFolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-Dependencies-*.*.*.*") | Where-Object { $_.PSIsContainer })
             if ($dependenciesFolder.Count -gt 1) {
                 $dependenciesFolder | Out-Host
                 throw "Internal error - multiple dependencies folders located"
@@ -259,14 +294,14 @@ try {
                 $parameters.dependencyAppFiles = @(Get-Item -Path (Join-Path $dependenciesFolder[0] "*.app") | ForEach-Object { $_.FullName })
             }
             if ($nuGetAccount.ContainsKey('PackageName')) {
-                $parameters.packageId = $nuGetAccount.PackageName.replace('{project}',$projectName).replace('{owner}',$ENV:GITHUB_REPOSITORY_OWNER).replace('{repo}',$env:RepoName)
+                $parameters.packageId = $nuGetAccount.PackageName.replace('{project}',$projectName).replace('{owner}',$ENV:GITHUB_REPOSITORY_OWNER).replace('{repo}',$env:repoName)
             }
             else {
                 if ($thisProject -and ($thisProject -eq '.')) {
-                    $parameters.packageId = "$($ENV:GITHUB_REPOSITORY_OWNER)-$($env:RepoName)"
+                    $parameters.packageId = "$($ENV:GITHUB_REPOSITORY_OWNER)-$($env:repoName)"
                 }
                 else {
-                    $parameters.packageId = "$($ENV:GITHUB_REPOSITORY_OWNER)-$($env:RepoName)-$ProjectName"
+                    $parameters.packageId = "$($ENV:GITHUB_REPOSITORY_OWNER)-$($env:repoName)-$ProjectName"
                 }
             }
             if ($type -eq 'CD') {
@@ -295,43 +330,32 @@ try {
             Push-BcNuGetPackage -nuGetServerUrl $nuGetServerUrl -nuGetToken $nuGetToken -bcNuGetPackage $package
         }
         elseif ($deliveryTarget -eq "Storage") {
+            EnsureAzStorageModule
             try {
-                if (get-command New-AzureStorageContext -ErrorAction SilentlyContinue) {
-                    Write-Host "Using Azure.Storage PowerShell module"
-                }
-                else {
-                    if (!(get-command New-AzStorageContext -ErrorAction SilentlyContinue)) {
-                        OutputError -message "When delivering to storage account, the build agent needs to have either the Azure.Storage or the Az.Storage PowerShell module installed."
-                        exit
-                    }
-                    Write-Host "Using Az.Storage PowerShell module"
-                    Set-Alias -Name New-AzureStorageContext -Value New-AzStorageContext
-                    Set-Alias -Name Get-AzureStorageContainer -Value Get-AzStorageContainer
-                    Set-Alias -Name Set-AzureStorageBlobContent -Value Set-AzStorageBlobContent
-                }
                 $storageAccount = $storageContext | ConvertFrom-Json | ConvertTo-HashTable
+                Write-Host "Json OK"
                 if ($storageAccount.ContainsKey('sastoken')) {
-                    $azStorageContext = New-AzureStorageContext -StorageAccountName $storageAccount.StorageAccountName -SasToken $storageAccount.sastoken
+                    $azStorageContext = New-AzStorageContext -StorageAccountName $storageAccount.StorageAccountName -SasToken $storageAccount.sastoken
                 }
                 else {
-                    $azStorageContext = New-AzureStorageContext -StorageAccountName $storageAccount.StorageAccountName -StorageAccountKey $storageAccount.StorageAccountKey
+                    $azStorageContext = New-AzStorageContext -StorageAccountName $storageAccount.StorageAccountName -StorageAccountKey $storageAccount.StorageAccountKey
                 }
                 Write-Host "StorageContext OK"
             }
             catch {
-                throw "StorageContext secret is malformed. Needs to be formatted as Json, containing StorageAccountName, containerName, blobName and sastoken or storageAccountKey, which points to an existing container in a storage account."
+                throw "StorageContext secret is malformed. Needs to be formatted as Json, containing StorageAccountName, containerName, blobName and sastoken or storageAccountKey, which points to an existing container in a storage account.`nError was: $($_.Exception.Message)"
             }
 
             $storageContainerName =  $storageAccount.ContainerName.ToLowerInvariant().replace('{project}',$projectName).replace('{branch}',$refname).ToLowerInvariant()
             $storageBlobName = $storageAccount.BlobName.ToLowerInvariant()
             Write-Host "Storage Container Name is $storageContainerName"
             Write-Host "Storage Blob Name is $storageBlobName"
-            Get-AzureStorageContainer -Context $azStorageContext -name $storageContainerName | Out-Null
+            Get-AzStorageContainer -Context $azStorageContext -name $storageContainerName | Out-Null
             Write-Host "Delivering to $storageContainerName in $($storageAccount.StorageAccountName)"
             $atypes.Split(',') | ForEach-Object {
                 $atype = $_
                 Write-Host "Looking for: $project-$refname-$atype-*.*.*.*"
-                $artfolder = @(Get-ChildItem -Path (Join-Path $baseFolder "$project-$refname-$atype-*.*.*.*") -Directory)
+                $artfolder = @(Get-ChildItem -Path (Join-Path $baseFolder "$project-$refname-$atype-*.*.*.*") | Where-Object { $_.PSIsContainer })
                 if ($artFolder.Count -eq 0) {
                     if ($atype -eq "Apps") {
                         throw "Error - unable to locate apps"
@@ -352,7 +376,7 @@ try {
                     if ($type -eq "Release") {
                         $versions += @($version,"latest")
                     }
-                    $tempFile = Join-Path $ENV:TEMP "$([Guid]::newguid().ToString()).zip"
+                    $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) "$([Guid]::newguid().ToString()).zip"
                     try {
                         Write-Host "Compressing"
                         Compress-Archive -Path (Join-Path $artfolder '*') -DestinationPath $tempFile -Force
@@ -360,7 +384,7 @@ try {
                             $version = $_
                             $blob = $storageBlobName.replace('{project}',$projectName).replace('{branch}',$refname).replace('{version}',$version).replace('{type}',$atype).ToLowerInvariant()
                             Write-Host "Delivering $blob"
-                            Set-AzureStorageBlobContent -Context $azStorageContext -Container $storageContainerName -File $tempFile -blob $blob -Force | Out-Null
+                            Set-AzStorageBlobContent -Context $azStorageContext -Container $storageContainerName -File $tempFile -blob $blob -Force | Out-Null
                         }
                     }
                     finally {
@@ -370,10 +394,11 @@ try {
             }
         }
         elseif ($deliveryTarget -eq "AppSource") {
+            EnsureAzStorageModule
             $appSourceContextHt = $appSourceContext | ConvertFrom-Json | ConvertTo-HashTable
             $authContext = New-BcAuthContext @appSourceContextHt
 
-            $projectSettings = Get-Content -Path (Join-Path $ENV:GITHUB_WORKSPACE "$thisProject\.AL-Go\settings.json") | ConvertFrom-Json | ConvertTo-HashTable -Recurse
+            $projectSettings = Get-Content -Path (Join-Path $ENV:GITHUB_WORKSPACE "$thisProject/.AL-Go/settings.json") | ConvertFrom-Json | ConvertTo-HashTable -Recurse
             if ($projectSettings.ContainsKey("AppSourceMainAppFolder")) {
                 $AppSourceMainAppFolder = $projectSettings.AppSourceMainAppFolder
             }
@@ -386,14 +411,14 @@ try {
                 }
             }
             if (-not $projectSettings.ContainsKey('AppSourceProductId')) {
-                throw "AppSourceProductId needs to be specified in $thisProject\.AL-Go\settings.json in order to deliver to AppSource"
+                throw "AppSourceProductId needs to be specified in $thisProject/.AL-Go/settings.json in order to deliver to AppSource"
             }
             Write-Host "AppSource MainAppFolder $AppSourceMainAppFolder"
 
-            $mainAppJson = Get-Content -Path (Join-Path $ENV:GITHUB_WORKSPACE "$thisProject\$AppSourceMainAppFolder\app.json") | ConvertFrom-Json
+            $mainAppJson = Get-Content -Path (Join-Path $ENV:GITHUB_WORKSPACE "$thisProject/$AppSourceMainAppFolder/app.json") | ConvertFrom-Json
             $mainAppVersion = [Version]$mainAppJson.Version
             $mainAppFileName = ("$($mainAppJson.Publisher)_$($mainAppJson.Name)_".Split([System.IO.Path]::GetInvalidFileNameChars()) -join '') + "*.*.*.*.app"
-            $artfolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-Apps-*.*.*.*") -Directory)
+            $artfolder = @(Get-ChildItem -Path (Join-Path $baseFolder "*-$refname-Apps-*.*.*.*") | Where-Object { $_.PSIsContainer })
             if ($artFolder.Count -eq 0) {
                 throw "Internal error - unable to locate apps"
             }
