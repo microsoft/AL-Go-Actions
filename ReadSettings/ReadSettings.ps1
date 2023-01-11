@@ -160,6 +160,10 @@ try {
                     Write-Host "Building all projects"
                     $buildProjects = $projects
                 }
+                elseif ($filesChanged -like '.github/*.json') {
+                    Write-Host "Changes to Repo Settings, building all projects"
+                    $buildProjects = $projects
+                }
                 elseif ($filesChanged.Count -ge 250) {
                     Write-Host "More than 250 files modified, building all projects"
                     $buildProjects = $projects
@@ -201,7 +205,7 @@ try {
                 Write-Host "BuildOrderDepth=$($buildOrder.Count)"
             }
         }
-        if (Test-Path ".AL-Go" -PathType Container) {
+        if (Test-Path (Join-Path ".AL-Go" "settings.json") -PathType Leaf) {
             $buildProjects += @(".")
         }
         if ($buildProjects.Count -eq 1) {
