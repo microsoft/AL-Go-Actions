@@ -28,7 +28,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 $telemetryScope = $null
 $bcContainerHelperPath = $null
-$tmpFolder = Join-Path $env:TEMP ([Guid]::NewGuid().ToString())
+$tmpFolder = Join-Path ([System.IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
 
 # IMPORTANT: No code that can fail should be outside the try/catch
 
@@ -107,7 +107,7 @@ try {
                     $SettingsJson.appFolders += @($folderName)
                 }
             }
-            $SettingsJson | ConvertTo-Json -Depth 99 | Set-Content -Path $settingsJsonFile -Encoding UTF8
+            $SettingsJson | Set-JsonContentLF -Path $settingsJsonFile
         }
     }
     catch {

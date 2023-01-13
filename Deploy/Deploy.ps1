@@ -37,20 +37,26 @@ try {
 
     $EnvironmentName = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($environmentName))
 
+    $artifacts = $artifacts.Replace('/',([System.IO.Path]::DirectorySeparatorChar)).Replace('\',([System.IO.Path]::DirectorySeparatorChar))
+
     $apps = @()
     $baseFolder = Join-Path $ENV:GITHUB_WORKSPACE ".artifacts"
     $baseFolderCreated = $false
+    if ($artifacts -eq ".artifacts") {
+        $artifacts = $baseFolder
+    }
 
     if ($artifacts -like "$($ENV:GITHUB_WORKSPACE)*") {
         if (Test-Path $artifacts -PathType Container) {
             $projects.Split(',') | ForEach-Object {
-                $project = $_.Replace('\','_')
+                $project = $_.Replace('\','_').Replace('/','_')
+                $refname = "$ENV:GITHUB_REF_NAME".Replace('/','_')
                 Write-Host "project '$project'"
-                $apps += @((Get-ChildItem -Path $artifacts -Filter "$project-main-Apps-*.*.*.*") | ForEach-Object { $_.FullName })
+                $apps += @((Get-ChildItem -Path $artifacts -Filter "$project-$refname-Apps-*.*.*.*") | ForEach-Object { $_.FullName })
                 if (!($apps)) {
-                    throw "There is no artifacts present in $artifacts."
+                    throw "There is no artifacts present in $artifacts matching $project-$refname-Apps-<version>."
                 }
-                $apps += @((Get-ChildItem -Path $artifacts -Filter "$project-main-Dependencies-*.*.*.*") | ForEach-Object { $_.FullName })
+                $apps += @((Get-ChildItem -Path $artifacts -Filter "$project-$refname-Dependencies-*.*.*.*") | ForEach-Object { $_.FullName })
             }
         }
         elseif (Test-Path $artifacts) {
@@ -107,10 +113,10 @@ try {
     $apps | Out-Host
 
     Set-Location $ENV:GITHUB_WORKSPACE
-    if (-not ($ENV:AUTHCONTEXT)) {
+    if (-not ($ENV:AuthContext)) {
         throw "An environment secret for environment($environmentName) called AUTHCONTEXT containing authentication information for the environment was not found.You must create an environment secret."
     }
-    $authContext = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($ENV:AUTHCONTEXT))
+    $authContext = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($ENV:AuthContext))
 
     try {
         $authContextParams = $authContext | ConvertFrom-Json | ConvertTo-HashTable
