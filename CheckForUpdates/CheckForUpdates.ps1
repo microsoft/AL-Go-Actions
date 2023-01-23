@@ -236,6 +236,9 @@ try {
 
                 Set-Location -Path *
             
+                # checkout branch to update
+                invoke-git checkout $updateBranch
+
                 if (!$directcommit) {
                     $branch = [System.IO.Path]::GetRandomFileName()
                     invoke-git checkout -b $branch
