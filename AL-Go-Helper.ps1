@@ -16,7 +16,7 @@ $RepoSettingsFile = Join-Path '.github' 'AL-Go-Settings.json'
 $defaultCICDPushBranches = @( 'main', 'release/*', 'feature/*' )
 $defaultCICDPullRequestBranches = @( 'main' )
 $runningLocal = $local.IsPresent
-$defaultBcContainerHelperVersion = "" # Must be double quotes. Will be replaced by BcContainerHelperVersion if necessary in the deploy step
+$defaultBcContainerHelperVersion = "latest" # Must be double quotes. Will be replaced by BcContainerHelperVersion if necessary in the deploy step
 $microsoftTelemetryConnectionString = "InstrumentationKey=84bd9223-67d4-4378-8590-9e4a46023be2;IngestionEndpoint=https://westeurope-1.in.applicationinsights.azure.com/"
 
 $runAlPipelineOverrides = @(
@@ -33,6 +33,7 @@ $runAlPipelineOverrides = @(
     "RunTestsInBcContainer"
     "GetBcContainerAppRuntimePackage"
     "RemoveBcContainer"
+    "InstallMissingDependencies"
 )
 
 # Well known AppIds
@@ -64,6 +65,22 @@ else {
     $isWindows = $true
     $isLinux = $false
     $IsMacOS = $false
+}
+
+# Copy a HashTable to ensure non case sensitivity (Issue #385)
+function Copy-HashTable() {
+    [CmdletBinding()]
+    Param(
+        [parameter(ValueFromPipeline)]
+        [hashtable] $object
+    )
+    $ht = @{}
+    if ($object) {
+        $object.Keys | ForEach-Object { 
+            $ht[$_] = $object[$_]
+        }
+    }
+    $ht
 }
 
 function ConvertTo-HashTable() {
@@ -232,7 +249,7 @@ function DownloadAndImportBcContainerHelper {
     elseif ($bcContainerHelperVersion -eq "private") {
         # Using a private BcContainerHelper version grabs a fork of BcContainerHelper with the same owner as the AL-Go actions
         # The ActionsRepo below will be modified to point to actual running actions repo by the deploy mechanism, please do not change
-        $ActionsRepo = "microsoft/AL-Go-Actions@main"
+        $ActionsRepo = "microsoft/AL-Go-Actions@v3.0"
         $owner = $actionsRepo.Split('/')[0]
         $bcContainerHelperVersion = "https://github.com/$owner/navcontainerhelper/archive/master.zip"
     }
@@ -612,6 +629,8 @@ function AnalyzeRepo {
         [string] $repository = $ENV:GITHUB_REPOSITORY
     )
 
+    $settings = $settings | Copy-HashTable
+    
     if (!$runningLocal) {
         Write-Host "::group::Analyzing repository"
     }
@@ -683,7 +702,7 @@ function AnalyzeRepo {
         }
     }
 
-    Write-Host "Checking appFolders and testFolders"
+    Write-Host "Checking appFolders, testFolders and bcptTestFolders"
     $dependencies = [ordered]@{}
     $appIdFolders = [ordered]@{}
     1..3 | ForEach-Object {
@@ -713,8 +732,7 @@ function AnalyzeRepo {
             $enumerate = $true
 
             # Check if there are any folders matching $folder
-            # Test-Path $folder -PathType Container will return false if any files matches $folder (beside folders)
-            if (-not ((Test-Path $folder) -and (Get-ChildItem $folder -Directory))) {
+            if (Get-Item $folder | Where-Object { $_ -is [System.IO.DirectoryInfo] }) {
                 if (!$doNotIssueWarnings) { OutputWarning -message "$descr $folderName, specified in $ALGoSettingsFile, does not exist" }
             }
             elseif (-not (Test-Path $appJsonFile -PathType Leaf)) {
@@ -940,8 +958,6 @@ function AnalyzeRepo {
     }
 
     Write-Host "Checking project dependencies"
-
-
 
     Write-Host "Checking appDependencyProbingPaths"
     if ($settings.appDependencyProbingPaths) {
@@ -1772,24 +1788,37 @@ Function AnalyzeProjectDependencies {
     Param(
         [string] $baseFolder,
         [string[]] $projects,
-        [ref] $buildOrder,
         [ref] $buildAlso,
         [ref] $projectDependencies
     )
 
     $appDependencies = @{}
-    Write-Host "Analyzing projects"
+    Write-Host "Analyzing projects in $baseFolder"
+
     # Loop through all projects
     # Get all apps in the project
     # Get all dependencies for the apps
     $projects | ForEach-Object {
         $project = $_
-        Write-Host "- $project"
-        $apps = @()
-        $folders = @(Get-ChildItem -Path (Join-Path $baseFolder $project) -Recurse | Where-Object { $_.PSIsContainer -and (Test-Path (Join-Path $_.FullName 'app.json')) } | ForEach-Object { $_.FullName.Substring($baseFolder.Length+1) } )
+        Write-Host "- Analyzing project: $project"
+
+        # Read project settings
+        $projectSettings = ReadSettings -baseFolder $baseFolder -project $project
+
+        # Filter out app folders that doesn't contain an app.json file
+        $folders = @($projectSettings.appFolders) + @($projectSettings.testFolders) + @($projectSettings.bcptTestFolders) | ForEach-Object { Resolve-Path (Join-Path $project $_) -Relative } | Where-Object { Test-Path (Join-Path $_ app.json)}
+
+        # Default to scanning the project folder if no app folders are specified
+        if (-not $folders) {
+            Write-Host "No apps or tests folders found for project $project. Scanning for apps in the project folder."
+            $folders = @(Get-ChildItem -Path (Join-Path $baseFolder $project) -Recurse | Where-Object { $_.PSIsContainer -and (Test-Path (Join-Path $_.FullName 'app.json')) } | ForEach-Object { $_.FullName.Substring($baseFolder.Length+1) } )
+        }
+
+        Write-Host "Folders containing apps are $($folders -join ',' )"
+
         $unknownDependencies = @()
         $apps = @()
-        $sortedFolders = Sort-AppFoldersByDependencies -appFolders $folders -baseFolder $baseFolder -WarningAction SilentlyContinue -unknownDependencies ([ref]$unknownDependencies) -knownApps ([ref]$apps)
+        Sort-AppFoldersByDependencies -appFolders $folders -baseFolder $baseFolder -WarningAction SilentlyContinue -unknownDependencies ([ref]$unknownDependencies) -knownApps ([ref]$apps) | Out-Null
         $appDependencies."$project" = @{
             "apps" = $apps
             "dependencies" = @($unknownDependencies | ForEach-Object { $_.Split(':')[0] })
@@ -1807,6 +1836,7 @@ Function AnalyzeProjectDependencies {
     #     }
     # }
     $no = 1
+    $projectsOrder = @()
     Write-Host "Analyzing dependencies"
     while ($projects.Count -gt 0) {
         $thisJob = @()
@@ -1874,27 +1904,34 @@ Function AnalyzeProjectDependencies {
             throw "Circular project reference encountered, cannot determine build order"
         }
         Write-Host "#$no - build projects: $($thisJob -join ", ")"
+        
+        $projectsOrder += @{'projects' = $thisJob; 'projectsCount' = $thisJob.Count }
+        
         $projects = @($projects | Where-Object { $thisJob -notcontains $_ })
-        $buildOrder.value."$no" = @($thisJob)
         $no++
     }
+
+    return @($projectsOrder)
 }
 
 function GetBaseFolder {
     Param(
         [string] $folder
     )
-
-    if (!(Test-Path (Join-Path $folder '.github') -PathType Container)) {
-        $folder = (Get-Item -Path $folder).Parent.FullName
-        if (!(Test-Path (Join-Path $folder '.github') -PathType Container)) {
-            $folder = (Get-Item -Path $folder).Parent.FullName
-            if (!(Test-Path (Join-Path $folder '.github') -PathType Container)) {
-                throw "Cannot determine base folder from folder $folder."
-            }
-        }
+    
+    Push-Location $folder
+    try {
+        $baseFolder = invoke-git rev-parse --show-toplevel -returnValue
     }
-    $folder
+    finally {
+        Pop-Location
+    }
+
+    if (!$baseFolder -or !(Test-Path (Join-Path $baseFolder '.github') -PathType Container)) {
+        throw "Cannot determine base folder from folder $folder."
+    }
+    
+    return $baseFolder
 }
 
 function GetProject {
