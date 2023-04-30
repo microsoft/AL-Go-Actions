@@ -88,13 +88,24 @@ function ConvertTo-HashTable() {
     [CmdletBinding()]
     Param(
         [parameter(ValueFromPipeline)]
-        [PSCustomObject] $object,
+        $object,
         [switch] $recurse
     )
+
     $ht = @{}
-    if ($object) {
-        $object.PSObject.Properties | ForEach-Object { 
-            if ($recurse -and ($_.Value -is [PSCustomObject])) {
+    if ($object -is [System.Collections.Specialized.OrderedDictionary] -or $object -is [hashtable]) {
+        $object.Keys | ForEach-Object {
+            if ($recurse -and ($object."$_" -is [System.Collections.Specialized.OrderedDictionary] -or $object."$_" -is [hashtable] -or $object."$_" -is [PSCustomObject])) {
+                $ht[$_] = ConvertTo-HashTable $object."$_" -recurse
+            }
+            else {
+                $ht[$_] = $object."$_"
+            }
+        }
+    }
+    elseif ($object -is [PSCustomObject]) {
+        $object.PSObject.Properties | ForEach-Object {
+            if ($recurse -and ($object."$_" -is [System.Collections.Specialized.OrderedDictionary] -or $object."$_" -is [hashtable] -or $_.Value -is [PSCustomObject])) {
                 $ht[$_.Name] = ConvertTo-HashTable $_.Value
             }
             else {
@@ -1766,8 +1777,18 @@ Function AnalyzeProjectDependencies {
         $projectSettings = ReadSettings -baseFolder $baseFolder -project $project
 
         # Filter out app folders that doesn't contain an app.json file
-        $folders = @($projectSettings.appFolders) + @($projectSettings.testFolders) + @($projectSettings.bcptTestFolders) | ForEach-Object { Resolve-Path (Join-Path $project $_) -Relative } | Where-Object { Test-Path (Join-Path $_ app.json)}
-
+        $folders = @($projectSettings.appFolders) + @($projectSettings.testFolders) + @($projectSettings.bcptTestFolders) | ForEach-Object { 
+            $projectFolder = Join-Path $project $_
+            if (!(Test-Path $projectFolder -PathType Container)) {
+                Write-Host "::Warning::Folder $_ doesn't exist, skipping."
+            }
+            elseif (!(Test-Path (Join-Path $projectFolder 'app.json'))) {
+                Write-Host "::Warning::Folder $_ doesn't contain an app.json file, skipping."
+            }
+            else {
+                Resolve-Path $projectFolder -Relative
+            }
+        }
         # Default to scanning the project folder if no app folders are specified
         if (-not $folders) {
             Write-Host "No apps or tests folders found for project $project. Scanning for apps in the project folder."
