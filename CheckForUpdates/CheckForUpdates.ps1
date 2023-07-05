@@ -73,7 +73,7 @@ try {
 
     # Get Repo settings as a hashtable
     $repoSettings = ReadSettings -project '' -workflowName '' -userName '' -branchName '' | ConvertTo-HashTable
-    $unusedALGoSystemFiles = $repoSettings.unusedALGoSystemFiles
+    $unusedALGoSystemFiles = @()
 
     # if UpdateSettings is true, we need to update the settings file with the new template url (i.e. there are changes to your AL-Go System files)
     $updateSettings = $true
