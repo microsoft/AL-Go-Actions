@@ -423,7 +423,6 @@ try {
         -CreateRuntimePackages:$CreateRuntimePackages `
         -appBuild $appBuild -appRevision $appRevision `
         -uninstallRemovedApps `
-        -doNotRunTests `
         -keepContainer
 
     Write-Host "Script path: $PSScriptRoot"
