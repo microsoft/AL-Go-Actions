@@ -389,7 +389,7 @@ try {
         }
     }
 
-    Write-Host "Invoke Run-AlPipeline with buildmode $buildMode"
+    # Compile first time to generate en-US xliff
     Run-AlPipeline @runAlPipelineParams `
         -pipelinename $workflowName `
         -containerName $containerName `
@@ -404,18 +404,13 @@ try {
         -sharedFolder $sharedFolder `
         -licenseFile $licenseFileUrl `
         -installApps $installApps `
-        -installTestApps $installTestApps `
         -installOnlyReferencedApps:$repo.installOnlyReferencedApps `
         -generateDependencyArtifact:$repo.generateDependencyArtifact `
         -updateDependencies:$repo.updateDependencies `
         -previousApps $previousApps `
         -appFolders $repo.appFolders `
-        -testFolders $repo.testFolders `
-        -bcptTestFolders $repo.bcptTestFolders `
         -buildOutputFile $buildOutputFile `
         -containerEventLogFile $containerEventLogFile `
-        -testResultsFile $testResultsFile `
-        -testResultsFormat 'JUnit' `
         -customCodeCops $repo.customCodeCops `
         -gitHubActions `
         -failOn $repo.failOn `
@@ -427,7 +422,55 @@ try {
         -buildArtifactFolder $buildArtifactFolder `
         -CreateRuntimePackages:$CreateRuntimePackages `
         -appBuild $appBuild -appRevision $appRevision `
-        -uninstallRemovedApps
+        -uninstallRemovedApps `
+        -doNotRunTests `
+        -keepContainer
+
+    Write-Host "Script path: $PSScriptRoot"
+    Write-Host "Project path: $projectPath"
+    Write-Host "Shared folder path: $sharedFolder"
+    # TODO: Run translation script
+
+    # Write-Host "Invoke Run-AlPipeline with buildmode $buildMode"
+    # Run-AlPipeline @runAlPipelineParams `
+    #     -pipelinename $workflowName `
+    #     -containerName $containerName `
+    #     -reUseContainer `
+    #     -imageName $imageName `
+    #     -bcAuthContext $authContext `
+    #     -environment $environmentName `
+    #     -artifact $artifact.replace('{INSIDERSASTOKEN}', $insiderSasToken) `
+    #     -vsixFile $repo.vsixFile `
+    #     -companyName $repo.companyName `
+    #     -memoryLimit $repo.memoryLimit `
+    #     -baseFolder $projectPath `
+    #     -sharedFolder $sharedFolder `
+    #     -licenseFile $licenseFileUrl `
+    #     -installApps $installApps `
+    #     -installTestApps $installTestApps `
+    #     -installOnlyReferencedApps:$repo.installOnlyReferencedApps `
+    #     -generateDependencyArtifact:$repo.generateDependencyArtifact `
+    #     -updateDependencies:$repo.updateDependencies `
+    #     -previousApps $previousApps `
+    #     -appFolders $repo.appFolders `
+    #     -testFolders $repo.testFolders `
+    #     -bcptTestFolders $repo.bcptTestFolders `
+    #     -buildOutputFile $buildOutputFile `
+    #     -containerEventLogFile $containerEventLogFile `
+    #     -testResultsFile $testResultsFile `
+    #     -testResultsFormat 'JUnit' `
+    #     -customCodeCops $repo.customCodeCops `
+    #     -gitHubActions `
+    #     -failOn $repo.failOn `
+    #     -treatTestFailuresAsWarnings:$repo.treatTestFailuresAsWarnings `
+    #     -rulesetFile $repo.rulesetFile `
+    #     -appSourceCopMandatoryAffixes $repo.appSourceCopMandatoryAffixes `
+    #     -additionalCountries $additionalCountries `
+    #     -obsoleteTagMinAllowedMajorMinor $repo.obsoleteTagMinAllowedMajorMinor `
+    #     -buildArtifactFolder $buildArtifactFolder `
+    #     -CreateRuntimePackages:$CreateRuntimePackages `
+    #     -appBuild $appBuild -appRevision $appRevision `
+    #     -uninstallRemovedApps
 
     if ($containerBaseFolder) {
 
