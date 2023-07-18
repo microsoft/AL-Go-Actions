@@ -1,0 +1,91 @@
+{
+    "name": "al-language-tools",
+    "displayName": "AL Language Tools",
+    "description": "Tools for a better BC development experience (Dynamics 365 Business Central)",
+    "version": "0.0.22",
+    "publisher": "ClipDynamics",
+    "icon": "images/icon.png",
+    "license": "UNLICENSED",
+    "galleryBanner": {
+        "color": "#2175EA",
+        "theme": "dark"
+    },
+    "categories": [
+        "Other",
+        "Extension Packs",
+        "Snippets"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/LauraNicolas/al-language-tools.git"
+    },
+    "author": {
+        "name": "ClipDynamics",
+        "url": "https://ClipDynamics.com",
+        "email": "laura.nicolas@clipdynamics.com"
+    },
+    "keywords": [
+        "Dynamics 365 Business Central BC DBC",
+        "Dynamics NAV Navision",
+        "AL Language",
+        "Laura Nicolas",
+        "ClipDynamics"
+    ],
+    "engines": {
+        "vscode": "^1.28.0"
+    },
+    "activationEvents": [
+        "onCommand:ALToolsFunctions.GenerateXliffFiles"
+    ],
+    "main": "./out/extension",
+    "contributes": {
+        "commands": [
+            {
+                "command": "ALToolsFunctions.GenerateXliffFiles",
+                "title": "AL: Generate Xliff files (AL Tools)"
+            }
+        ],
+        "snippets": [
+            {
+                "language": "al",
+                "path": "./snippets/ALtesting.json"
+            },
+            {
+                "language": "al",
+                "path": "./snippets/ALcaptions.json"
+            },
+            {
+                "language": "al",
+                "path": "./snippets/ALreport.json"
+            },
+            {
+                "language": "al",
+                "path": "./snippets/ALfrequentcode.json"
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "postinstall": "node ./node_modules/vscode/bin/install",
+        "test": "npm run compile && node ./node_modules/vscode/bin/test"
+    },
+    "devDependencies": {
+        "@types/mocha": "^2.2.42",
+        "@types/node": "^9.6.35",
+        "typescript": "^2.6.1",
+        "vscode": "^1.1.21"
+    },
+    "dependencies": {
+        "format-duration": "^1.3.1",
+        "ncp": "^2.0.0",
+        "opn": "^5.4.0",
+        "path": "^0.12.7",
+        "powershell": "^2.3.0",
+        "time-stamp": "^1.1.0",
+        "types": "^0.1.1",
+        "watch": "^1.0.2",
+        "xml2js": "^0.4.19"
+    }
+}
