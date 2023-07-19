@@ -389,11 +389,15 @@ try {
         }
     }
 
+    # Create docker credential
+    $pipelineDockerCredential = (New-Object pscredential 'admin', (ConvertTo-SecureString -String (Get-RandomPassword -PasswordLength 16) -AsPlainText -Force))
+
     # Compile first time to generate en-US xliff
     Write-Host "Invoke Run-AlPipeline for original XLIFF generation"
     Run-AlPipeline @runAlPipelineParams `
         -pipelinename $workflowName `
         -containerName $containerName `
+        -credential $pipelineDockerCredential `
         -imageName $imageName `
         -bcAuthContext $authContext `
         -environment $environmentName `
@@ -438,6 +442,7 @@ try {
     Run-AlPipeline @runAlPipelineParams `
         -pipelinename $workflowName `
         -containerName $containerName `
+        -credential $pipelineDockerCredential `
         -reUseContainer `
         -imageName $imageName `
         -bcAuthContext $authContext `
@@ -507,4 +512,22 @@ finally {
         Remove-Item -Path (Join-Path $projectPath '*') -Recurse -Force
         Write-Host "Done"
     }
+}
+
+Function Get-RandomPassword {
+    #define parameters
+    param([int]$PasswordLength = 10)
+ 
+    #ASCII Character set for Password
+    $CharacterSet = @{
+        Uppercase   = (97..122) | Get-Random -Count 10 | % { [char]$_ }
+        Lowercase   = (65..90)  | Get-Random -Count 10 | % { [char]$_ }
+        Numeric     = (48..57)  | Get-Random -Count 10 | % { [char]$_ }
+        SpecialChar = (33..47) + (58..64) + (91..96) + (123..126) | Get-Random -Count 10 | % { [char]$_ }
+    }
+ 
+    #Frame Random Password from given character set
+    $StringSet = $CharacterSet.Uppercase + $CharacterSet.Lowercase + $CharacterSet.Numeric + $CharacterSet.SpecialChar
+ 
+    -join (Get-Random -Count $PasswordLength -InputObject $StringSet)
 }
