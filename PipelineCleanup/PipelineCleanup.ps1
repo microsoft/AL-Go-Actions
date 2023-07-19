@@ -21,8 +21,8 @@ try {
     
     if ($project -eq ".") { $project = "" }
 
-    # $containerName = GetContainerName($project)
-    # Remove-Bccontainer $containerName
+    $containerName = GetContainerName($project)
+    Remove-Bccontainer $containerName
 
     TrackTrace -telemetryScope $telemetryScope
 }
