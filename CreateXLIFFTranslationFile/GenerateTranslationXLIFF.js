@@ -104,6 +104,7 @@ function onStringParsed(err, result) {
         //Writting the new file
         fs.writeFile(`${PROJECT_PATH}\\Translations\\${appJSON.name}.${newLanguageCodes[i]}.g.xlf`, xml, 'utf8', onFileWritten);
         console.log(`Created file: ${PROJECT_PATH}\\Translations\\${appJSON.name}.${newLanguageCodes[i]}.g.xlf`);
+        console.log(xml);
     }
 }
 /**
