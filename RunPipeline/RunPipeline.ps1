@@ -390,6 +390,7 @@ try {
     }
 
     # Compile first time to generate en-US xliff
+    Write-Host "Invoke Run-AlPipeline for original XLIFF generation"
     Run-AlPipeline @runAlPipelineParams `
         -pipelinename $workflowName `
         -containerName $containerName `
@@ -427,8 +428,10 @@ try {
 
     Write-Host "Script path: $PSScriptRoot"
     Write-Host "Project path: $projectPath"
+    # Generate translated XLIFF files
     $CreateTranslationScriptPath = (Join-Path -Path $PSScriptRoot -ChildPath "..\CreateXLIFFTranslationFile\GenerateTranslationXLIFF.js" -Resolve)
     Write-Host "Translation script path: $CreateTranslationScriptPath"
+    Write-Host "Generating Translated XLIFF files"
     & 'C:\Program Files\nodejs\node.exe' $CreateTranslationScriptPath $projectPath
 
     # Write-Host "Invoke Run-AlPipeline with buildmode $buildMode"
