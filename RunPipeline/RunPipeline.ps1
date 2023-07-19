@@ -446,7 +446,8 @@ try {
         -CreateRuntimePackages:$CreateRuntimePackages `
         -appBuild $appBuild -appRevision $appRevision `
         -uninstallRemovedApps `
-        -keepContainer
+        -keepContainer `
+        -PublishBcContainerApp { Write-Host "Publish override" }
 
     Write-Host "Script path: $PSScriptRoot"
     Write-Host "Project path: $projectPath"
