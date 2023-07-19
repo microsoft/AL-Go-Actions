@@ -427,8 +427,10 @@ try {
 
     Write-Host "Script path: $PSScriptRoot"
     Write-Host "Project path: $projectPath"
-    Write-Host "Shared folder path: $sharedFolder"
     # TODO: Run translation script
+    $CreateTranslationScriptPath = (Join-Path -Path $PSScriptRoot -ChildPath "..\CreateXLIFFTranslationFile\GenerateTranslationXLIFF.js" -Resolve)
+    Write-Host "Translation script path: $CreateTranslationScriptPath"
+    node $CreateTranslationScriptPath $projectPath
 
     # Write-Host "Invoke Run-AlPipeline with buildmode $buildMode"
     # Run-AlPipeline @runAlPipelineParams `
