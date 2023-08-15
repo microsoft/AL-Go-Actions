@@ -7,6 +7,8 @@ Param(
     [string] $parentTelemetryScopeJson = '7b7d',
     [Parameter(HelpMessage = "Name of the online environment", Mandatory = $true)]
     [string] $environmentName,
+    [Parameter(HelpMessage = "Project name if the repository is setup for multiple projects", Mandatory = $false)]
+    [string] $project = '.',
     [Parameter(HelpMessage = "Admin center API credentials", Mandatory = $false)]
     [string] $adminCenterApiCredentials,
     [Parameter(HelpMessage = "Reuse environment if it exists", Mandatory = $false)]
@@ -17,12 +19,8 @@ Param(
     [bool] $directCommit    
 )
 
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2.0
 $telemetryScope = $null
 $bcContainerHelperPath = $null
-
-# IMPORTANT: No code that can fail should be outside the try/catch
 
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
@@ -49,6 +47,7 @@ try {
         -environmentName $environmentName `
         -reUseExistingEnvironment:$reUseExistingEnvironment `
         -baseFolder $repoBaseFolder `
+        -project $project `
         -bcContainerHelperPath $bcContainerHelperPath `
         -adminCenterApiCredentials ($adminCenterApiCredentials | ConvertFrom-Json | ConvertTo-HashTable)
 
@@ -57,8 +56,8 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message "CreateDevelopmentEnvironment action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
     TrackException -telemetryScope $telemetryScope -errorRecord $_
+    throw
 }
 finally {
     CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
