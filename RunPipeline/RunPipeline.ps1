@@ -5,27 +5,23 @@ Param(
     [string] $token,
     [Parameter(HelpMessage = "Specifies the parent telemetry scope for the telemetry signal", Mandatory = $false)]
     [string] $parentTelemetryScopeJson = '7b7d',
+    [Parameter(HelpMessage = "ArtifactUrl to use for the build", Mandatory = $false)]
+    [string] $artifact = "",
     [Parameter(HelpMessage = "Project folder", Mandatory = $false)]
     [string] $project = "",
-    [Parameter(HelpMessage = "Project Dependencies in compressed Json format", Mandatory = $false)]
-    [string] $projectDependenciesJson = "",
-    [Parameter(HelpMessage = "Settings from repository in compressed Json format", Mandatory = $false)]
-    [string] $settingsJson = '{"appBuild":"", "appRevision":""}',
-    [Parameter(HelpMessage = "Secrets from repository in compressed Json format", Mandatory = $false)]
-    [string] $secretsJson = '{"insiderSasToken":"","licenseFileUrl":"","codeSignCertificateUrl":"","codeSignCertificatePassword":"","keyVaultCertificateUrl":"","keyVaultCertificatePassword":"","keyVaultClientId":"","storageContext":"","applicationInsightsConnectionString":""}',
     [Parameter(HelpMessage = "Specifies a mode to use for the build steps", Mandatory = $false)]
     [ValidateSet('Default', 'Translated', 'Clean')]
-    [string] $buildMode = 'Default'
+    [string] $buildMode = 'Default',
+    [Parameter(HelpMessage = "A JSON-formatted list of apps to install", Mandatory = $false)]
+    [string] $installAppsJson = '[]',
+    [Parameter(HelpMessage = "A JSON-formatted list of test apps to install", Mandatory = $false)]
+    [string] $installTestAppsJson = '[]'
 )
 
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2.0
 $telemetryScope = $null
 $bcContainerHelperPath = $null
 $containerBaseFolder = $null
 $projectPath = $null
-
-# IMPORTANT: No code that can fail should be outside the try/catch
 
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
@@ -44,7 +40,23 @@ try {
   
     $containerName = GetContainerName($project)
 
-    $runAlPipelineParams = @{}
+    $ap = "$ENV:GITHUB_ACTION_PATH".Split('\')
+    $branch = $ap[$ap.Count-2]
+    $owner = $ap[$ap.Count-4]
+
+    if ($owner -ne "microsoft") {
+        $verstr = "dev"
+    }
+    else {
+        $verstr = $branch
+    }
+
+    $runAlPipelineParams = @{
+        "sourceRepositoryUrl" = "$ENV:GITHUB_SERVER_URL/$ENV:GITHUB_REPOSITORY"
+        "sourceCommit" = $ENV:GITHUB_SHA
+        "buildBy" = "AL-Go for GitHub,$verstr"
+        "buildUrl" = "$ENV:GITHUB_SERVER_URL/$ENV:GITHUB_REPOSITORY/actions/runs/$ENV:GITHUB_RUN_ID"
+    }
     if ($project  -eq ".") { $project = "" }
     $baseFolder = $ENV:GITHUB_WORKSPACE
     if ($bcContainerHelperConfig.useVolumes -and $bcContainerHelperConfig.hostHelperFolder -eq "HostHelperFolder") {
@@ -67,11 +79,12 @@ try {
     $workflowName = "$env:GITHUB_WORKFLOW".Trim()
 
     Write-Host "use settings and secrets"
-    $settings = $settingsJson | ConvertFrom-Json | ConvertTo-HashTable
-    $secrets = $secretsJson | ConvertFrom-Json | ConvertTo-HashTable
+    $settings = $env:Settings | ConvertFrom-Json | ConvertTo-HashTable
+    $secrets = $env:Secrets | ConvertFrom-Json | ConvertTo-HashTable
     $appBuild = $settings.appBuild
     $appRevision = $settings.appRevision
-    'licenseFileUrl','insiderSasToken','codeSignCertificateUrl','codeSignCertificatePassword','keyVaultCertificateUrl','keyVaultCertificatePassword','keyVaultClientId','storageContext','gitHubPackagesContext','applicationInsightsConnectionString' | ForEach-Object {
+    'licenseFileUrl','insiderSasToken','codeSignCertificateUrl','codeSignCertificatePassword','keyVaultCertificateUrl','keyVaultCertificatePassword','keyVaultClientId','gitHubPackagesContext','applicationInsightsConnectionString' | ForEach-Object {
+        # Secrets might not be read during Pull Request runs
         if ($secrets.Keys -contains $_) {
             $value = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets."$_"))
         }
@@ -88,10 +101,12 @@ try {
             "useCompilerFolder" = $true
         }
     }
-    $gitHubHostedRunner = $settings.gitHubRunner -like "windows-*" -or $settings.gitHubRunner -like "ubuntu-*"
-    if ($gitHubHostedRunner) {
-        # If we are running GitHub hosted agents and UseCompilerFolder is set, we need to set the artifactCachePath, and avoid checking the artifact setting in AnalyzeRepo
-        if ($settings.useCompilerFolder) {
+    if ($artifact) {
+        # Avoid checking the artifact setting in AnalyzeRepo if we have an artifactUrl
+        $settings.artifact = $artifact
+        $gitHubHostedRunner = $settings.gitHubRunner -like "windows-*" -or $settings.gitHubRunner -like "ubuntu-*"
+        if ($gitHubHostedRunner -and $settings.useCompilerFolder) {
+            # If we are running GitHub hosted agents and UseCompilerFolder is set (and we have an artifactUrl), we need to set the artifactCachePath
             $runAlPipelineParams += @{
                 "artifactCachePath" = Join-Path $ENV:GITHUB_WORKSPACE ".artifactcache"
             }
@@ -102,7 +117,8 @@ try {
     }
 
     $repo = AnalyzeRepo -settings $settings -token $token -baseFolder $baseFolder -project $project -insiderSasToken $insiderSasToken @analyzeRepoParams
-    if ((-not $repo.appFolders) -and (-not $repo.testFolders)) {
+
+    if ((-not $repo.appFolders) -and (-not $repo.testFolders) -and (-not $repo.bcptTestFolders)) {
         Write-Host "Repository is empty, exiting"
         exit
     }
@@ -113,65 +129,19 @@ try {
         }
     }
 
-    $artifact = $repo.artifact
     $installApps = $repo.installApps
     $installTestApps = $repo.installTestApps
 
-    Write-Host "Project: $project"
-    if ($project -and $repo.useProjectDependencies -and $projectDependenciesJson -ne "") {
-        Write-Host "Using project dependencies: $projectDependenciesJson"
-
-        $projectDependencies = $projectDependenciesJson | ConvertFrom-Json | ConvertTo-HashTable
-        if ($projectDependencies.Keys -contains $project) {
-            $projects = @($projectDependencies."$project") -join ","
-        }
-        else {
-            $projects = ''
-        }
-        if ($projects) {
-            Write-Host "Project dependencies: $projects"
-            $thisBuildProbingPaths = @(@{
-                "release_status" = "thisBuild"
-                "version" = "latest"
-                "projects" = $projects
-                "repo" = "$ENV:GITHUB_SERVER_URL/$ENV:GITHUB_REPOSITORY"
-                "branch" = $ENV:GITHUB_REF_NAME
-                "authTokenSecret" = $token
-            })
-            Get-dependencies -probingPathsJson $thisBuildProbingPaths | where-Object { $_ } | ForEach-Object {
-                if ($_.startswith('(')) {
-                    $installTestApps += $_    
-                }
-                else {
-                    $installApps += $_    
-                }
-            }
-        }
-        else {
-            Write-Host "No project dependencies"
-        }
-    }
-
-    if ($repo.appDependencyProbingPaths) {
-        Write-Host "::group::Downloading dependencies"
-        Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths | ForEach-Object {
-            if ($_.startswith('(')) {
-                $installTestApps += $_    
-            }
-            else {
-                $installApps += $_    
-            }
-        }
-        Write-Host "::endgroup::"
-    }
+    $installApps += $installAppsJson | ConvertFrom-Json
+    $installTestApps += $installTestAppsJson | ConvertFrom-Json
 
     # Analyze app.json version dependencies before launching pipeline
 
-    # Analyze InstallApps and InstallTestApps before launching pipeline
+    # Analyze InstallApps and InstallTestApps before launching pipeline 
 
-    # Check if insidersastoken is used (and defined)
-
-    if (!$repo.doNotSignApps -and $codeSignCertificateUrl -and $codeSignCertificatePassword) {
+    # Check if codeSignCertificateUrl+Password is used (and defined)
+    if (!$repo.doNotSignApps -and $codeSignCertificateUrl -and $codeSignCertificatePassword -and !$repo.keyVaultCodesignCertificateName) {
+        OutputWarning -message "Using the legacy CodeSignCertificateUrl and CodeSignCertificatePassword parameters. Consider using the new Azure Keyvault signing instead. Go to https://aka.ms/ALGoSettings#keyVaultCodesignCertificateName to find out more"
         $runAlPipelineParams += @{ 
             "CodeSignCertPfxFile" = $codeSignCertificateUrl
             "CodeSignCertPfxPassword" = ConvertTo-SecureString -string $codeSignCertificatePassword -AsPlainText -Force
@@ -221,7 +191,7 @@ try {
         $imageName = $repo.cacheImageName
         if ($imageName) {
             Write-Host "::group::Flush ContainerHelper Cache"
-            Flush-ContainerHelperCache -keepdays $repo.cacheKeepDays
+            Flush-ContainerHelperCache -cache 'all,exitedcontainers' -keepdays $repo.cacheKeepDays
             Write-Host "::endgroup::"
         }
     }
@@ -256,7 +226,7 @@ try {
     $buildOutputFile = Join-Path $projectPath "BuildOutput.txt"
     $containerEventLogFile = Join-Path $projectPath "ContainerEventLog.evtx"
 
-    "containerName=$containerName" | Add-Content $ENV:GITHUB_ENV
+    Add-Content -Encoding UTF8 -Path $env:GITHUB_ENV -Value "containerName=$containerName"
 
     Set-Location $projectPath
     $runAlPipelineOverrides | ForEach-Object {
@@ -396,7 +366,7 @@ try {
         -imageName $imageName `
         -bcAuthContext $authContext `
         -environment $environmentName `
-        -artifact $artifact.replace('{INSIDERSASTOKEN}',$insiderSasToken) `
+        -artifact $repo.artifact.replace('{INSIDERSASTOKEN}',$insiderSasToken) `
         -vsixFile $repo.vsixFile `
         -companyName $repo.companyName `
         -memoryLimit $repo.memoryLimit `
@@ -444,8 +414,8 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message "RunPipeline action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
     TrackException -telemetryScope $telemetryScope -errorRecord $_
+    throw
 }
 finally {
     try {

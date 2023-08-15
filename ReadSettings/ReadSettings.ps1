@@ -17,12 +17,8 @@ Param(
     [string] $get = ""
 )
 
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2.0
 $telemetryScope = $null
 $bcContainerHelperPath = $null
-
-# IMPORTANT: No code that can fail should be outside the try/catch
 
 try {
     $baseFolder = $ENV:GITHUB_WORKSPACE
@@ -37,7 +33,7 @@ try {
         $getSettings = $get.Split(',').Trim()
     }
     else {
-        $getSettings = @($settings.Keys)
+        $getSettings = @()
     }
 
     if ($ENV:GITHUB_EVENT_NAME -in @("pull_request_target", "pull_request")) {
@@ -50,74 +46,78 @@ try {
     }
 
     if ($settings.versioningstrategy -ne -1) {
-        if ($getSettings -contains 'appBuild' -or $getSettings -contains 'appRevision') {
-            switch ($settings.versioningStrategy -band 15) {
-                0 { # Use RUN_NUMBER and RUN_ATTEMPT
-                    $settings.appBuild = $settings.runNumberOffset + [Int32]($ENV:GITHUB_RUN_NUMBER)
-                    $settings.appRevision = [Int32]($ENV:GITHUB_RUN_ATTEMPT) - 1
-                }
-                1 { # Use RUN_ID and RUN_ATTEMPT
-                    OutputError -message "Versioning strategy 1 is no longer supported"
-                }
-                2 { # USE DATETIME
-                    $settings.appBuild = [Int32]([DateTime]::UtcNow.ToString('yyyyMMdd'))
-                    $settings.appRevision = [Int32]([DateTime]::UtcNow.ToString('HHmmss'))
-                }
-                15 { # Use maxValue
-                    $settings.appBuild = [Int32]::MaxValue
-                    $settings.appRevision = 0
-                }
-                default {
-                    OutputError -message "Unknown version strategy $versionStrategy"
-                    exit
-                }
+        switch ($settings.versioningStrategy -band 15) {
+            0 { # Use RUN_NUMBER and RUN_ATTEMPT
+                $settings.appBuild = $settings.runNumberOffset + [Int32]($ENV:GITHUB_RUN_NUMBER)
+                $settings.appRevision = [Int32]($ENV:GITHUB_RUN_ATTEMPT) - 1
+            }
+            1 { # Use RUN_ID and RUN_ATTEMPT
+                OutputError -message "Versioning strategy 1 is no longer supported"
+            }
+            2 { # USE DATETIME
+                $settings.appBuild = [Int32]([DateTime]::UtcNow.ToString('yyyyMMdd'))
+                $settings.appRevision = [Int32]([DateTime]::UtcNow.ToString('HHmmss'))
+            }
+            15 { # Use maxValue
+                $settings.appBuild = [Int32]::MaxValue
+                $settings.appRevision = 0
+            }
+            default {
+                OutputError -message "Unknown version strategy $versionStrategy"
+                exit
             }
         }
     }
 
     $outSettings = @{}
-    $getSettings | ForEach-Object {
-        $setting = $_.Trim()
+    $settings.Keys | ForEach-Object {
+        $setting = $_
         $settingValue = $settings."$setting"
         $outSettings += @{ "$setting" = $settingValue }
-        if ($settingValue -is [System.Collections.Specialized.OrderedDictionary]) {
-            Add-Content -Path $env:GITHUB_ENV -Value "$setting=$($settingValue | ConvertTo-Json -Depth 99 -Compress)"
-        }
-        else {
-            Add-Content -Path $env:GITHUB_ENV -Value "$setting=$settingValue"
+        if ($getSettings -contains $setting) {
+            if ($settingValue -is [System.Collections.Specialized.OrderedDictionary] -or $settingValue -is [hashtable]) {
+                Add-Content -Encoding UTF8 -Path $env:GITHUB_ENV -Value "$setting=$(ConvertTo-Json $settingValue -Depth 99 -Compress)"
+            }
+            elseif ($settingValue -is [String] -and ($settingValue.contains("`n") -or $settingValue.contains("`r"))) {
+                throw "Setting $setting contains line breaks, which is not supported"
+            }
+            else {
+                Add-Content -Encoding UTF8 -Path $env:GITHUB_ENV -Value "$setting=$settingValue"
+            }
         }
     }
 
-    $outSettingsJson = $outSettings | ConvertTo-Json -Depth 99 -Compress
-    Add-Content -Path $env:GITHUB_OUTPUT -Value "SettingsJson=$outSettingsJson"
-    Add-Content -Path $env:GITHUB_ENV -Value "Settings=$OutSettingsJson"
-    Write-Host "SettingsJson=$outSettingsJson"
+    Write-Host "SETTINGS:"
+    $outSettings | ConvertTo-Json -Depth 99 | Out-Host
+    Add-Content -Encoding UTF8 -Path $env:GITHUB_ENV -Value "Settings=$($outSettings | ConvertTo-Json -Depth 99 -Compress)"
 
     $gitHubRunner = $settings.githubRunner.Split(',').Trim() | ConvertTo-Json -compress
-    Add-Content -Path $env:GITHUB_OUTPUT -Value "GitHubRunnerJson=$githubRunner"
+    Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "GitHubRunnerJson=$githubRunner"
     Write-Host "GitHubRunnerJson=$githubRunner"
 
     $gitHubRunnerShell = $settings.githubRunnerShell
-    Add-Content -Path $env:GITHUB_OUTPUT -Value "GitHubRunnerShell=$githubRunnerShell"
+    Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "GitHubRunnerShell=$githubRunnerShell"
     Write-Host "GitHubRunnerShell=$githubRunnerShell"
 
     if ($getenvironments) {
         $environments = @()
         $headers = @{ 
-            "Authorization" = "token $token"
-            "Accept"        = "application/vnd.github.v3+json"
+            "Authorization"        = "token $token"
+            "Accept"               = "application/vnd.github.v3+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
         }
         Write-Host "Requesting environments: $getEnvironments"
         $url = "$($ENV:GITHUB_API_URL)/repos/$($ENV:GITHUB_REPOSITORY)/environments"
         try {
             Write-Host "Trying to get environments from GitHub API"
-            $ghEnvironments = @((InvokeWebRequest -Headers $headers -Uri $url -ignoreErrors | ConvertFrom-Json).environments | ForEach-Object { $_.Name })
+            $ghEnvironments = @((InvokeWebRequest -Headers $headers -Uri $url -ignoreErrors | ConvertFrom-Json).environments | Where-Object { $_.name -like $getEnvironments })
         } 
         catch {
             $ghEnvironments = @()
             Write-Host "Failed to get environments from GitHub API - Environments are not supported in this repository"
         }
-        $environments = @($ghEnvironments+@($settings.environments) | Select-Object -unique | Where-Object { $_ -ne "github-pages" })
+        Write-Host "Requesting environments from settings"
+        $environments = @(@($ghEnvironments | ForEach-Object { $_.name })+@($settings.environments) | Select-Object -unique | Where-Object { $_ -ne "github-pages" })
         $unknownEnvironment = 0
         if (!($environments)) {
             $unknownEnvironment = 1
@@ -139,13 +139,24 @@ try {
                     $_ -like $getEnvironments -and $_ -notlike '* (PROD)' -and $_ -notlike '* (Production)' -and $_ -notlike '* (FAT)' -and $_ -notlike '* (Final Acceptance Test)'
                 }
             } | Where-Object {
-                Write-Host "Environment: $_"
-                if ($ghEnvironments -contains $_) {
-                    # Environment is GitHub Environment, default branches are controlled on GitHub
-                    $branches = @( '*' )
+                $envName = $_
+                Write-Host "Environment: $envName"
+                $ghEnvironment = $ghEnvironments | Where-Object { $_.name -eq $envName }
+                if ($ghEnvironment) {
+                    $branchPolicy = ($ghEnvironment.protection_rules | Where-Object { $_.type -eq "branch_policy" })
+                    if ($branchPolicy) {
+                        Write-Host "GitHub Environment $envName has branch policies, getting branches from GitHub API"
+                        $branchesUrl = "$($ENV:GITHUB_API_URL)/repos/$($ENV:GITHUB_REPOSITORY)/environments/$([Uri]::EscapeDataString($envName))/deployment-branch-policies"
+                        Write-Host "Getting branches for $envName from GitHub API"
+                        $branches = @((InvokeWebRequest -Headers $headers -Uri $branchesUrl -ignoreErrors | ConvertFrom-Json).branch_policies | ForEach-Object { $_.name })
+                    }
+                    else {
+                        Write-Host "GitHub Environment $envName does not have branch policies, using main as default"
+                        $branches = @( 'main' )
+                    }
                 }
                 else {
-                    # Environment is in settings, default branches are controlled in settings
+                    Write-Host "Environment $envName was defined in settings, using main as default"
                     $branches = @( 'main' )
                 }
                 $environmentName = $_.Split(' ')[0]
@@ -175,21 +186,20 @@ try {
             $json.matrix.include += @{ "environment" = $_; "os" = "$($runson | ConvertTo-Json -compress)" }
         }
         $environmentsJson = $json | ConvertTo-Json -Depth 99 -compress
-        Add-Content -Path $env:GITHUB_OUTPUT -Value "EnvironmentsJson=$environmentsJson"
-        Add-Content -Path $env:GITHUB_ENV -Value "environments=$environmentsJson"
+        Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "EnvironmentsJson=$environmentsJson"
+        Add-Content -Encoding UTF8 -Path $env:GITHUB_ENV -Value "environments=$environmentsJson"
         Write-Host "EnvironmentsJson=$environmentsJson"
-        Add-Content -Path $env:GITHUB_OUTPUT -Value "EnvironmentCount=$($environments.Count)"
+        Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "EnvironmentCount=$($environments.Count)"
         Write-Host "EnvironmentCount=$($environments.Count)"
-        Add-Content -Path $env:GITHUB_OUTPUT -Value "UnknownEnvironment=$unknownEnvironment"
+        Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "UnknownEnvironment=$unknownEnvironment"
         Write-Host "UnknownEnvironment=$unknownEnvironment"
     }
 
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message "ReadSettings action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
     TrackException -telemetryScope $telemetryScope -errorRecord $_
-    exit
+    throw
 }
 finally {
     CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath

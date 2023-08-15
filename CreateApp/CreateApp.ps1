@@ -20,21 +20,23 @@ Param(
     [bool] $sampleCode,
     [Parameter(HelpMessage = "Include Sample BCPT Suite (Y/N)", Mandatory = $false)]
     [bool] $sampleSuite,
+    [Parameter(HelpMessage = "Set the branch to update", Mandatory = $false)]
+    [string] $updateBranch,
     [Parameter(HelpMessage = "Direct Commit (Y/N)", Mandatory = $false)]
     [bool] $directCommit
 )
 
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2.0
 $telemetryScope = $null
 $bcContainerHelperPath = $null
 $tmpFolder = Join-Path ([System.IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
 
-# IMPORTANT: No code that can fail should be outside the try/catch
-
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
-    $branch = "$(if (!$directCommit) { [System.IO.Path]::GetRandomFileName() })"
+    $branch = ''
+    if (!$directcommit) {
+        # If not direct commit, create a new branch with name, relevant to the current date and base branch, and switch to it
+        $branch = "create-$($type.replace(' ','-').ToLowerInvariant())/$updateBranch/$((Get-Date).ToUniversalTime().ToString(`"yyMMddHHmmss`"))" # e.g. create-pte/main/210101120000
+    }
     $serverUrl = CloneIntoNewFolder -actor $actor -token $token -branch $branch
     $baseFolder = (Get-Location).Path
     $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $baseFolder
@@ -62,7 +64,7 @@ try {
     if ($type -eq "Performance Test App") {
         try {
             $settings = ReadSettings -baseFolder $baseFolder -project $project
-            $settings = AnalyzeRepo -settings $settings -token $token -baseFolder $baseFolder -project $project -doNotIssueWarnings
+            $settings = AnalyzeRepo -settings $settings -token $token -baseFolder $baseFolder -project $project -doNotIssueWarnings -doNotCheckAppDependencyProbingPaths
             $folders = Download-Artifacts -artifactUrl $settings.artifact -includePlatform
             $sampleApp = Join-Path $folders[0] "Applications.*\Microsoft_Performance Toolkit Samples_*.app"
             if (Test-Path $sampleApp) {
@@ -138,8 +140,8 @@ try {
 
 }
 catch {
-    OutputError -message "CreateApp action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
     TrackException -telemetryScope $telemetryScope -errorRecord $_
+    throw
 }
 finally {
     CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath

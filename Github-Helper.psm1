@@ -107,7 +107,7 @@ function InvokeWebRequest {
     }
 }
 
-function Get-dependencies {
+function Get-Dependencies {
     Param(
         $probingPathsJson,
         [string] $api_url = $ENV:GITHUB_API_URL,
@@ -121,10 +121,17 @@ function Get-dependencies {
     $downloadedList = @()
     'Apps','TestApps' | ForEach-Object {
         $mask = $_
-        Write-Host "Locating all $mask artifacts from probing paths"
         $probingPathsJson | ForEach-Object {
             $dependency = $_
             $projects = $dependency.projects
+            $buildMode = $dependency.buildMode
+            
+            # change the mask to include the build mode
+            if($buildMode -ne "Default") {
+                $mask = "$buildMode$mask"
+            }
+
+            Write-Host "Locating $mask artifacts for projects: $projects"
             
             if ($dependency.release_status -eq "thisBuild") {
                 $missingProjects = @()
@@ -146,14 +153,14 @@ function Get-dependencies {
                             Write-Host "$($_.FullName) found from previous job"
                         }
                     }
-                    elseif ($mask -ne 'TestApps') {
+                    elseif ($mask -notlike '*TestApps') {
                         Write-Host "$_ not built, downloading from artifacts"
                         $missingProjects += @($_)
                     }
                 }
                 if ($missingProjects) {
                     $dependency.release_status = 'latestBuild'
-                    $dependency.branch = "main"
+                    $dependency.branch = $dependency.baseBranch
                     $dependency.projects = $missingProjects -join ","
                 }
             }
@@ -298,7 +305,12 @@ function invoke-gh {
             $arguments += "$_ "
         }
     }
-    cmdDo -command gh -arguments $arguments -silent:$silent -returnValue:$returnValue -inputStr $inputStr
+    try {
+        cmdDo -command gh -arguments $arguments -silent:$silent -returnValue:$returnValue -inputStr $inputStr
+    }
+    catch [System.Management.Automation.MethodInvocationException] {
+        throw "It looks like GitHub CLI is not installed. Please install GitHub CLI from https://cli.github.com/"
+    }
 }
 
 function invoke-git {
@@ -320,7 +332,12 @@ function invoke-git {
             $arguments += "$_ "
         }
     }
-    cmdDo -command git -arguments $arguments -silent:$silent -returnValue:$returnValue -inputStr $inputStr
+    try {
+        cmdDo -command git -arguments $arguments -silent:$silent -returnValue:$returnValue -inputStr $inputStr
+    }
+    catch [System.Management.Automation.MethodInvocationException] {
+        throw "It looks like Git is not installed. Please install Git from https://git-scm.com/download"
+    }
 }
 
 # Convert a semantic version object to a semantic version string
@@ -535,7 +552,8 @@ function GetReleaseNotes {
         [string] $repository = $ENV:GITHUB_REPOSITORY,
         [string] $api_url = $ENV:GITHUB_API_URL,
         [string] $tag_name,
-        [string] $previous_tag_name
+        [string] $previous_tag_name,
+        [string] $target_commitish
     )
     
     Write-Host "Generating release note $api_url/repos/$repository/releases/generate-notes"
@@ -544,8 +562,11 @@ function GetReleaseNotes {
         tag_name = $tag_name;
     }
 
-    if (-not [string]::IsNullOrEmpty($previous_tag_name)) {
+    if ($previous_tag_name) {
         $postParams["previous_tag_name"] = $previous_tag_name
+    }
+    if ($target_commitish) {
+        $postParams["target_commitish"] = $target_commitish
     }
 
     InvokeWebRequest -Headers (GetHeader -token $token) -Method POST -Body ($postParams | ConvertTo-Json) -Uri "$api_url/repos/$repository/releases/generate-notes" 
@@ -689,7 +710,7 @@ function GetArtifacts {
         $artifactsJson = InvokeWebRequest -Headers $headers -Uri $uri
         $artifacts = $artifactsJson | ConvertFrom-Json
         $page++
-        $allArtifacts += @($artifacts.artifacts | Where-Object { $_.name -like "*-$branch-$mask-$version" })
+        $allArtifacts += @($artifacts.artifacts | Where-Object { !$_.expired -and $_.name -like "*-$branch-$mask-$version" })
         $result = @()
         $allArtifactsFound = $true
         $projects.Split(',') | ForEach-Object {

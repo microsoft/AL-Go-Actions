@@ -9,20 +9,22 @@ Param(
     [string] $project = '*',
     [Parameter(HelpMessage = "Updated Version Number. Use Major.Minor for absolute change, use +Major.Minor for incremental change.", Mandatory = $true)]
     [string] $versionnumber,
+    [Parameter(HelpMessage = "Set the branch to update", Mandatory = $false)]
+    [string] $updateBranch,
     [Parameter(HelpMessage = "Direct commit (Y/N)", Mandatory = $false)]
     [bool] $directCommit
 )
 
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2.0
 $telemetryScope = $null
 $bcContainerHelperPath = $null
 
-# IMPORTANT: No code that can fail should be outside the try/catch
-
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
-    $branch = "$(if (!$directCommit) { [System.IO.Path]::GetRandomFileName() })"
+    $branch = ''
+    if (!$directcommit) {
+        # If not direct commit, create a new branch with name, relevant to the current date and base branch, and switch to it
+        $branch = "increment-version-number/$updateBranch/$((Get-Date).ToUniversalTime().ToString(`"yyMMddHHmmss`"))" # e.g. increment-version-number/main/210101120000
+    }
     $serverUrl = CloneIntoNewFolder -actor $actor -token $token -branch $branch
     $repoBaseFolder = (Get-Location).path
     $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $repoBaseFolder
@@ -128,8 +130,8 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message "IncrementVersionNumber action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
     TrackException -telemetryScope $telemetryScope -errorRecord $_
+    throw
 }
 finally {
     CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath

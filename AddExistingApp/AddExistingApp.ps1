@@ -9,6 +9,8 @@ Param(
     [string] $project = '.',
     [Parameter(HelpMessage = "Direct Download Url of .app or .zip file", Mandatory = $true)]
     [string] $url,
+    [Parameter(HelpMessage = "Set the branch to update", Mandatory = $false)]
+    [string] $updateBranch,
     [Parameter(HelpMessage = "Direct Commit (Y/N)", Mandatory = $false)]
     [bool] $directCommit
 )
@@ -76,16 +78,16 @@ function expandfile {
     }
 }
 
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2.0
 $telemetryScope = $null
 $bcContainerHelperPath = $null
 
-# IMPORTANT: No code that can fail should be outside the try/catch
-
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
-    $branch = "$(if (!$directCommit) { [System.IO.Path]::GetRandomFileName() })"
+    $branch = ''
+    if (!$directcommit) {
+        # If not direct commit, create a new branch with name, relevant to the current date and base branch, and switch to it
+        $branch = "add-existing-app/$updateBranch/$((Get-Date).ToUniversalTime().ToString(`"yyMMddHHmmss`"))" # e.g. add-existing-app/main/210101120000
+    }
     $serverUrl = CloneIntoNewFolder -actor $actor -token $token -branch $branch
     $repoBaseFolder = (Get-Location).path
     $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $repoBaseFolder
@@ -184,7 +186,7 @@ try {
             try {
                 $settingsJsonFile = Join-Path $projectFolder $ALGoSettingsFile
                 $SettingsJson = Get-Content $settingsJsonFile -Encoding UTF8 | ConvertFrom-Json
-                if (@($settingsJson.appFolders)+@($settingsJson.testFolders)) {
+                if (@($settingsJson.appFolders) + @($settingsJson.testFolders)) {
                     if ($ttype -eq "Test App") {
                         if ($SettingsJson.testFolders -notcontains $foldername) {
                             $SettingsJson.testFolders += @($folderName)
@@ -214,7 +216,7 @@ try {
                     $workspace | Set-JsonContentLF -Path $workspaceFile
                 }
                 catch {
-                   throw "$workspaceFileName is malformed.$([environment]::Newline) $($_.Exception.Message)"
+                    throw "$workspaceFileName is malformed.$([environment]::Newline) $($_.Exception.Message)"
                 }
             }
         }
@@ -225,8 +227,8 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message "AddExistingApp acion failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
     TrackException -telemetryScope $telemetryScope -errorRecord $_
+    throw
 }
 finally {
     CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
