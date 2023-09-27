@@ -27,7 +27,6 @@ Param(
 )
 
 $telemetryScope = $null
-$bcContainerHelperPath = $null
 $tmpFolder = Join-Path ([System.IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
 
 try {
@@ -39,11 +38,11 @@ try {
     }
     $serverUrl = CloneIntoNewFolder -actor $actor -token $token -branch $branch
     $baseFolder = (Get-Location).Path
-    $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $baseFolder
+    DownloadAndImportBcContainerHelper -baseFolder $baseFolder
 
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0072' -parentTelemetryScopeJson $parentTelemetryScopeJson
-    
+
     import-module (Join-Path -path $PSScriptRoot -ChildPath "AppHelper.psm1" -Resolve)
     Write-Host "Template type : $type"
 
@@ -56,7 +55,7 @@ try {
         throw "An extension name must be specified."
     }
 
-    $ids = Confirm-IdRanges -templateType $type -idrange $idrange
+    $ids = ConfirmIdRanges -templateType $type -idrange $idrange
 
     CheckAndCreateProjectFolder -project $project
     $projectFolder = (Get-Location).Path
@@ -64,7 +63,7 @@ try {
     if ($type -eq "Performance Test App") {
         try {
             $settings = ReadSettings -baseFolder $baseFolder -project $project
-            $settings = AnalyzeRepo -settings $settings -token $token -baseFolder $baseFolder -project $project -doNotIssueWarnings -doNotCheckAppDependencyProbingPaths
+            $settings = AnalyzeRepo -settings $settings -baseFolder $baseFolder -project $project -doNotIssueWarnings
             $folders = Download-Artifacts -artifactUrl $settings.artifact -includePlatform
             $sampleApp = Join-Path $folders[0] "Applications.*\Microsoft_Performance Toolkit Samples_*.app"
             if (Test-Path $sampleApp) {
@@ -76,6 +75,7 @@ try {
             if (!(Test-Path -Path $sampleApp)) {
                 throw "Could not locate sample app for the Business Central version"
             }
+
             Extract-AppFileToFolder -appFilename $sampleApp -generateAppJson -appFolder $tmpFolder
         }
         catch {
@@ -122,16 +122,16 @@ try {
     }
 
     if ($type -eq "Performance Test App") {
-        New-SamplePerformanceTestApp -destinationPath (Join-Path $projectFolder $folderName) -name $name -publisher $publisher -version $appVersion -sampleCode $sampleCode -sampleSuite $sampleSuite -idrange $ids -appSourceFolder $tmpFolder
+        NewSamplePerformanceTestApp -destinationPath (Join-Path $projectFolder $folderName) -name $name -publisher $publisher -version $appVersion -sampleCode $sampleCode -sampleSuite $sampleSuite -idrange $ids -appSourceFolder $tmpFolder
     }
     elseif ($type -eq "Test App") {
-        New-SampleTestApp -destinationPath (Join-Path $projectFolder $folderName) -name $name -publisher $publisher -version $appVersion -sampleCode $sampleCode -idrange $ids
+        NewSampleTestApp -destinationPath (Join-Path $projectFolder $folderName) -name $name -publisher $publisher -version $appVersion -sampleCode $sampleCode -idrange $ids
     }
     else {
-        New-SampleApp -destinationPath (Join-Path $projectFolder $folderName) -name $name -publisher $publisher -version $appVersion -sampleCode $sampleCode -idrange $ids 
+        NewSampleApp -destinationPath (Join-Path $projectFolder $folderName) -name $name -publisher $publisher -version $appVersion -sampleCode $sampleCode -idrange $ids
     }
 
-    Update-WorkSpaces -projectFolder $projectFolder -appName $folderName
+    UpdateWorkspaces -projectFolder $projectFolder -appName $folderName
 
     Set-Location $baseFolder
     CommitFromNewFolder -serverUrl $serverUrl -commitMessage "New $type ($Name)" -branch $branch
@@ -140,11 +140,12 @@ try {
 
 }
 catch {
-    TrackException -telemetryScope $telemetryScope -errorRecord $_
+    if (Get-Module BcContainerHelper) {
+        TrackException -telemetryScope $telemetryScope -errorRecord $_
+    }
     throw
 }
 finally {
-    CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
     if (Test-Path $tmpFolder) {
         Remove-Item $tmpFolder -Recurse -Force
     }

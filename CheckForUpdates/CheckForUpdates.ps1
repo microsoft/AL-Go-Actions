@@ -14,18 +14,16 @@ Param(
     [Parameter(HelpMessage = "Set the branch to update", Mandatory = $false)]
     [string] $updateBranch,
     [Parameter(HelpMessage = "Direct Commit (Y/N)", Mandatory = $false)]
-    [bool] $directCommit    
+    [bool] $directCommit
 )
 
 $telemetryScope = $null
-$bcContainerHelperPath = $null
 
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
     . (Join-Path -Path $PSScriptRoot -ChildPath "yamlclass.ps1")
 
-    $baseFolder = $ENV:GITHUB_WORKSPACE
-    $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $baseFolder
+    DownloadAndImportBcContainerHelper
 
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0071' -parentTelemetryScopeJson $parentTelemetryScopeJson
@@ -92,7 +90,7 @@ try {
     Write-Host "Using ArchiveUrl $archiveUrl"
 
     # Download the template repository and unpack to a temp folder
-    $headers = @{             
+    $headers = @{
         "Accept" = "application/vnd.github.baptiste-preview+json"
         "token" = $token
     }
@@ -100,7 +98,7 @@ try {
     InvokeWebRequest -Headers $headers -Uri $archiveUrl -OutFile "$tempName.zip" -retry
     Expand-7zipArchive -Path "$tempName.zip" -DestinationPath $tempName
     Remove-Item -Path "$tempName.zip"
-    
+
     # CheckFiles is an array of hashtables with the following properties:
     # dstPath: The path to the file in the current repository
     # srcPath: The path to the file in the template repository
@@ -126,6 +124,7 @@ try {
         @{ "dstPath" = ".github"; "srcPath" = $srcGitHubPath; "pattern" = "*.copy.md"; "type" = "releasenotes" }
     )
     # Get the list of projects in the current repository
+    $baseFolder = $ENV:GITHUB_WORKSPACE
     if ($repoSettings.projects) {
         $projects = $repoSettings.projects
     }
@@ -158,7 +157,7 @@ try {
         $buildAlso = @{}
         $projectDependencies = @{}
         $projectsOrder = AnalyzeProjectDependencies -baseFolder $baseFolder -projects $projects -buildAlso ([ref]$buildAlso) -projectDependencies ([ref]$projectDependencies)
-        
+
         $depth = $projectsOrder.Count
         Write-Host "Calculated dependency depth to be $depth"
     }
@@ -261,7 +260,7 @@ try {
 
                         if ($depth -gt 1) {
                             # Also, duplicate the build job for each dependency depth
-                            
+
                             $build = $yaml.Get('jobs:/Build:/')
                             if($build)
                             {
@@ -300,7 +299,7 @@ try {
                                     $build.Replace('if:', $if)
                                     $build.Replace('needs:', "needs: [ $($needs -join ', ') ]")
                                     $build.Replace('strategy:/matrix:/include:',"include: `${{ fromJson(needs.Initialization.outputs.buildOrderJson)[$index].buildDimensions }}")
-                                    
+
                                     # Last build job is called build, all other build jobs are called build1, build2, etc.
                                     if ($depth -eq $_) {
                                         $newBuild += @("Build:")
@@ -329,7 +328,7 @@ try {
                 if ($directALGo) {
                     # If we are using the direct AL-Go repo, we need to change the owner and repo names in the workflow
                     $lines = $srcContent.Split("`n")
-                    
+
                     # The Original Owner and Repo in the AL-Go repository are microsoft/AL-Go-Actions, microsoft/AL-Go-PTE and microsoft/AL-Go-AppSource
                     $originalOwnerAndRepo = @{
                         "actionsRepo" = "microsoft/AL-Go-Actions"
@@ -426,7 +425,7 @@ try {
 
                 # checkout branch to update
                 invoke-git checkout $updateBranch
-                
+
                 # If $directCommit, then changes are made directly to the default branch
                 if (!$directcommit) {
                     # If not direct commit, create a new branch with name, relevant to the current date and base branch, and switch to it
@@ -459,37 +458,34 @@ try {
                 # Update the files
                 # Calculate the release notes, while updating
                 $releaseNotes = ""
-                try {
-                    $updateFiles | ForEach-Object {
-                        # Create the destination folder if it doesn't exist
-                        $path = [System.IO.Path]::GetDirectoryName($_.DstFile)
-                        if (-not (Test-Path -path $path -PathType Container)) {
-                            New-Item -Path $path -ItemType Directory | Out-Null
-                        }
-                        if (([System.IO.Path]::GetFileName($_.DstFile) -eq "RELEASENOTES.copy.md") -and (Test-Path $_.DstFile)) {
-                            $oldReleaseNotes = Get-ContentLF -Path $_.DstFile
-                            while ($oldReleaseNotes) {
-                                $releaseNotes = $_.Content
-                                if ($releaseNotes.indexOf($oldReleaseNotes) -gt 0) {
-                                    $releaseNotes = $releaseNotes.SubString(0, $releaseNotes.indexOf($oldReleaseNotes))
-                                    $oldReleaseNotes = ""
+                $updateFiles | ForEach-Object {
+                    # Create the destination folder if it doesn't exist
+                    $path = [System.IO.Path]::GetDirectoryName($_.DstFile)
+                    if (-not (Test-Path -path $path -PathType Container)) {
+                        New-Item -Path $path -ItemType Directory | Out-Null
+                    }
+                    if (([System.IO.Path]::GetFileName($_.DstFile) -eq "RELEASENOTES.copy.md") -and (Test-Path $_.DstFile)) {
+                        $oldReleaseNotes = Get-ContentLF -Path $_.DstFile
+                        while ($oldReleaseNotes) {
+                            $releaseNotes = $_.Content
+                            if ($releaseNotes.indexOf($oldReleaseNotes) -gt 0) {
+                                $releaseNotes = $releaseNotes.SubString(0, $releaseNotes.indexOf($oldReleaseNotes))
+                                $oldReleaseNotes = ""
+                            }
+                            else {
+                                $idx = $oldReleaseNotes.IndexOf("`n## ")
+                                if ($idx -gt 0) {
+                                    $oldReleaseNotes = $oldReleaseNotes.Substring($idx)
                                 }
                                 else {
-                                    $idx = $oldReleaseNotes.IndexOf("`n## ")
-                                    if ($idx -gt 0) {
-                                        $oldReleaseNotes = $oldReleaseNotes.Substring($idx)
-                                    }
-                                    else {
-                                        $oldReleaseNotes = ""
-                                    }
+                                    $oldReleaseNotes = ""
                                 }
                             }
                         }
-                        Write-Host "Update $($_.DstFile)"
-                        $_.Content | Set-ContentLF -Path $_.DstFile
                     }
+                    Write-Host "Update $($_.DstFile)"
+                    $_.Content | Set-ContentLF -Path $_.DstFile
                 }
-                catch {}
                 if ($releaseNotes -eq "") {
                     $releaseNotes = "No release notes available!"
                 }
@@ -539,9 +535,8 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    TrackException -telemetryScope $telemetryScope -errorRecord $_
+    if (Get-Module BcContainerHelper) {
+        TrackException -telemetryScope $telemetryScope -errorRecord $_
+    }
     throw
-}
-finally {
-    CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
 }

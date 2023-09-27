@@ -4,7 +4,6 @@ Param(
 )
 
 $telemetryScope = $null
-$BcContainerHelperPath = ""
 
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
@@ -26,9 +25,9 @@ try {
 
     Write-Big -str "a$verstr"
 
-    Test-ALGoRepository -baseFolder $ENV:GITHUB_WORKSPACE
+    Test-ALGoRepository
 
-    $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $ENV:GITHUB_WORKSPACE
+    DownloadAndImportBcContainerHelper
 
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId $eventId
@@ -55,7 +54,7 @@ try {
         AddTelemetryProperty -telemetryScope $telemetryScope -key "runAttempt" -value $ENV:GITHUB_RUN_ATTEMPT
         AddTelemetryProperty -telemetryScope $telemetryScope -key "runNumber" -value $ENV:GITHUB_RUN_NUMBER
         AddTelemetryProperty -telemetryScope $telemetryScope -key "runId" -value $ENV:GITHUB_RUN_ID
-        
+
         $scopeJson = strToHexStr -str ($telemetryScope | ConvertTo-Json -Compress)
         $correlationId = ($telemetryScope.CorrelationId).ToString()
     }
@@ -71,11 +70,8 @@ try {
     Write-Host "correlationId=$correlationId"
 }
 catch {
-    if ($bcContainerHelperPath) {
+    if (Get-Module BcContainerHelper) {
         TrackException -telemetryScope $telemetryScope -errorRecord $_
     }
     throw
-}
-finally {
-    CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
 }
