@@ -1,8 +1,4 @@
 Param(
-    [Parameter(HelpMessage = "The GitHub actor running the action", Mandatory = $false)]
-    [string] $actor,
-    [Parameter(HelpMessage = "The GitHub token running the action", Mandatory = $false)]
-    [string] $token,
     [Parameter(HelpMessage = "Specifies the parent telemetry scope for the telemetry signal", Mandatory = $false)]
     [string] $parentTelemetryScopeJson = '7b7d',
     [Parameter(HelpMessage = "Project to analyze", Mandatory = $false)]
@@ -10,11 +6,10 @@ Param(
 )
 
 $telemetryScope = $null
-$bcContainerHelperPath = $null
 
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
-    $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $ENV:GITHUB_WORKSPACE
+    DownloadAndImportBcContainerHelper
 
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0082' -parentTelemetryScopeJson $parentTelemetryScopeJson
@@ -28,7 +23,7 @@ try {
 
         Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "TestResultMD=$testResultSummary"
         Write-Host "TestResultMD=$testResultSummary"
-    
+
         Add-Content -path $ENV:GITHUB_STEP_SUMMARY -value "$($testResultSummary.Replace("\n","`n"))`n"
     }
     else {
@@ -46,9 +41,9 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    TrackException -telemetryScope $telemetryScope -errorRecord $_
+    if (Get-Module BcContainerHelper) {
+        TrackException -telemetryScope $telemetryScope -errorRecord $_
+    }
+
     throw
-}
-finally {
-    CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
 }
