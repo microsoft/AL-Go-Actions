@@ -21,7 +21,6 @@ Param(
 )
 
 $telemetryScope = $null
-$bcContainerHelperPath = $null
 
 function EnsureAzStorageModule() {
     if (get-command New-AzStorageContext -ErrorAction SilentlyContinue) {
@@ -38,7 +37,7 @@ function EnsureAzStorageModule() {
             Set-Alias -Name Set-AzStorageBlobContent -Value Set-AzureStorageBlobContent -Scope Script
         }
         else {
-            Write-Host "Installing and importing Az.Storage." 
+            Write-Host "Installing and importing Az.Storage."
             Install-Module 'Az.Storage' -Force
             Import-Module  'Az.Storage' -DisableNameChecking -WarningAction SilentlyContinue | Out-Null
         }
@@ -46,9 +45,8 @@ function EnsureAzStorageModule() {
 }
 
 try {
-    $baseFolder = $ENV:GITHUB_WORKSPACE
     . (Join-Path -Path $PSScriptRoot -ChildPath "../AL-Go-Helper.ps1" -Resolve)
-    $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $baseFolder
+    DownloadAndImportBcContainerHelper
 
     import-module (Join-Path -path $PSScriptRoot -ChildPath "../TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0081' -parentTelemetryScopeJson $parentTelemetryScopeJson
@@ -62,6 +60,7 @@ try {
 
     $artifacts = $artifacts.Replace('/',([System.IO.Path]::DirectorySeparatorChar)).Replace('\',([System.IO.Path]::DirectorySeparatorChar))
 
+    $baseFolder = $ENV:GITHUB_WORKSPACE
     $settings = ReadSettings -baseFolder $baseFolder
     if ($settings.projects) {
         $projectList = $settings.projects | Where-Object { $_ -like $projects }
@@ -79,21 +78,14 @@ try {
         throw "No projects matches the pattern '$projects'"
     }
     if ($deliveryTarget -eq "AppSource") {
-        $atypes = "Apps,Dependencies"        
+        $atypes = "Apps,Dependencies"
     }
     Write-Host "Artifacts $artifacts"
     Write-Host "Projects:"
     $projectList | Out-Host
 
-    if ("$env:deliveryContext" -eq "") {
-        throw "$($deliveryTarget)Context is not defined, cannot deliver to $deliveryTarget"
-    }
-    $key = "$($deliveryTarget)Context"
-    Write-Host "Using $key"
-    Set-Variable -Name $key -Value $env:deliveryContext
-
-    $projectList | ForEach-Object {
-        $thisProject = $_
+    $secrets = $env:Secrets | ConvertFrom-Json
+    foreach($thisProject in $projectList) {
         # $project should be the project part of the artifact name generated from the build
         if ($thisProject -and ($thisProject -ne '.')) {
             $project = $thisProject.Replace('\','_').Replace('/','_')
@@ -182,19 +174,19 @@ try {
 
         if (Test-Path $customScript -PathType Leaf) {
             Write-Host "Found custom script $customScript for delivery target $deliveryTarget"
-            
+
             $projectSettings = ReadSettings -baseFolder $baseFolder -project $thisProject
-            $projectSettings = AnalyzeRepo -settings $projectSettings -baseFolder $baseFolder -project $thisProject -doNotCheckArtifactSetting -doNotCheckAppDependencyProbingPaths -doNotIssueWarnings
+            $projectSettings = AnalyzeRepo -settings $projectSettings -baseFolder $baseFolder -project $thisProject -doNotCheckArtifactSetting -doNotIssueWarnings
             $parameters = @{
                 "Project" = $thisProject
                 "ProjectName" = $projectName
                 "type" = $type
-                "Context" = $env:deliveryContext
+                "Context" = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets."$($deliveryTarget)Context"))
                 "RepoSettings" = $settings
                 "ProjectSettings" = $projectSettings
             }
             #Calculate the folders per artifact type
-            
+
             #Calculate the folders per artifact type
             'Apps', 'TestApps', 'Dependencies' | ForEach-Object {
                 $artifactType = $_
@@ -226,12 +218,12 @@ try {
                     $parameters[$artifactType.ToLowerInvariant() + "Folders"] = $artifactFolders.FullName
                 }
             }
-            
+
             Write-Host "Calling custom script: $customScript"
             . $customScript -parameters $parameters
         }
         elseif ($deliveryTarget -eq "GitHubPackages") {
-            $githubPackagesCredential = $githubPackagesContext | ConvertFrom-Json
+            $githubPackagesCredential = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets.githubPackagesContext)) | ConvertFrom-Json
             'Apps' | ForEach-Object {
                 $folder = @(Get-ChildItem -Path (Join-Path $artifactsFolder "$project-$refname-$($_)-*.*.*.*") | Where-Object { $_.PSIsContainer })
                 if ($folder.Count -gt 1) {
@@ -255,10 +247,10 @@ try {
         }
         elseif ($deliveryTarget -eq "NuGet") {
             try {
-                $nuGetAccount = $nuGetContext | ConvertFrom-Json | ConvertTo-HashTable
+                $nuGetAccount = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets.nuGetContext)) | ConvertFrom-Json | ConvertTo-HashTable
                 $nuGetServerUrl = $nuGetAccount.ServerUrl
                 $nuGetToken = $nuGetAccount.Token
-                Write-Host "NuGetContext OK"
+                Write-Host "NuGetContext secret OK"
             }
             catch {
                 throw "NuGetContext secret is malformed. Needs to be formatted as Json, containing serverUrl and token as a minimum."
@@ -331,7 +323,7 @@ try {
         elseif ($deliveryTarget -eq "Storage") {
             EnsureAzStorageModule
             try {
-                $storageAccount = $storageContext | ConvertFrom-Json | ConvertTo-HashTable
+                $storageAccount = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets.storageContext)) | ConvertFrom-Json | ConvertTo-HashTable
                 # Check that containerName and blobName are present
                 $storageAccount.containerName | Out-Null
                 $storageAccount.blobName | Out-Null
@@ -405,13 +397,16 @@ try {
         }
         elseif ($deliveryTarget -eq "AppSource") {
             $projectSettings = ReadSettings -baseFolder $baseFolder -project $thisProject
-            $projectSettings = AnalyzeRepo -settings $projectSettings -baseFolder $baseFolder -project $thisProject -doNotCheckArtifactSetting -doNotCheckAppDependencyProbingPaths -doNotIssueWarnings
+            $projectSettings = AnalyzeRepo -settings $projectSettings -baseFolder $baseFolder -project $thisProject -doNotCheckArtifactSetting -doNotIssueWarnings
             # if type is Release, we only get here with the projects that needs to be delivered to AppSource
             # if type is CD, we get here for all projects, but should only deliver to AppSource if AppSourceContinuousDelivery is set to true
             if ($type -eq 'Release' -or ($projectSettings.Keys -contains 'AppSourceContinuousDelivery' -and $projectSettings.AppSourceContinuousDelivery)) {
                 EnsureAzStorageModule
-                $appSourceContextHt = $appSourceContext | ConvertFrom-Json | ConvertTo-HashTable
-                $authContext = New-BcAuthContext @appSourceContextHt
+                $appSourceContext = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets.appSourceContext)) | ConvertFrom-Json | ConvertTo-HashTable
+                if (!$appSourceContext) {
+                    throw "appSourceContext secret is missing"
+                }
+                $authContext = New-BcAuthContext @appSourceContext
 
                 if ($projectSettings.Keys -contains "AppSourceMainAppFolder") {
                     $AppSourceMainAppFolder = $projectSettings.AppSourceMainAppFolder
@@ -430,7 +425,6 @@ try {
                 Write-Host "AppSource MainAppFolder $AppSourceMainAppFolder"
 
                 $mainAppJson = Get-Content -Path (Join-Path $baseFolder "$thisProject/$AppSourceMainAppFolder/app.json") -Encoding UTF8 | ConvertFrom-Json
-                $mainAppVersion = [Version]$mainAppJson.Version
                 $mainAppFileName = ("$($mainAppJson.Publisher)_$($mainAppJson.Name)_".Split([System.IO.Path]::GetInvalidFileNameChars()) -join '') + "*.*.*.*.app"
                 $artfolder = @(Get-ChildItem -Path (Join-Path $artifactsFolder "$project-$refname-Apps-*.*.*.*") | Where-Object { $_.PSIsContainer })
                 if ($artFolder.Count -eq 0) {
@@ -471,9 +465,8 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    TrackException -telemetryScope $telemetryScope -errorRecord $_
+    if (Get-Module BcContainerHelper) {
+        TrackException -telemetryScope $telemetryScope -errorRecord $_
+    }
     throw
-}
-finally {
-    CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
 }
