@@ -315,7 +315,7 @@ try {
                     else {
                         invoke-git push -u $url $branch
                         invoke-gh version
-                        invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY --body "No release notes"
+                        invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY --body "$releaseNotes"
                     }
                 }
                 else {
