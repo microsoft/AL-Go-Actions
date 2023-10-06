@@ -314,8 +314,8 @@ try {
                     }
                     else {
                         invoke-git push -u $url $branch
-                        Start-Sleep -seconds 10
-                        invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY --body "$releaseNotes"
+                        invoke-gh version
+                        invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY --body "test"
                     }
                 }
                 else {
