@@ -9,6 +9,8 @@ Param(
     [string] $project = '.',
     [Parameter(HelpMessage = "Direct Download Url of .app or .zip file", Mandatory = $true)]
     [string] $url,
+    [Parameter(HelpMessage = "Set the branch to update", Mandatory = $false)]
+    [string] $updateBranch,
     [Parameter(HelpMessage = "Direct Commit (Y/N)", Mandatory = $false)]
     [bool] $directCommit
 )
@@ -37,11 +39,11 @@ function expandfile {
         # .zip file
         $destinationPath = Join-Path ([System.IO.Path]::GetTempPath()) "$([Guid]::NewGuid().ToString())"
         Expand-7zipArchive -path $path -destinationPath $destinationPath
-    
+
         $directoryInfo = Get-ChildItem $destinationPath | Measure-Object
         if ($directoryInfo.count -eq 0) {
             throw "The file is empty or malformed."
-        }      
+        }
 
         $appFolders = @()
         if (Test-Path (Join-Path $destinationPath 'app.json')) {
@@ -69,29 +71,28 @@ function expandfile {
     elseif ([string]::new([char[]](Get-Content $path @byteEncodingParam -TotalCount 4)) -eq "NAVX") {
         $destinationPath = Join-Path ([System.IO.Path]::GetTempPath()) "$([Guid]::NewGuid().ToString())"
         Extract-AppFileToFolder -appFilename $path -appFolder $destinationPath -generateAppJson
-        $destinationPath        
+        $destinationPath
     }
     else {
         throw "The provided url cannot be extracted. The url might be wrong or the file is malformed."
     }
 }
 
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2.0
 $telemetryScope = $null
-$bcContainerHelperPath = $null
-
-# IMPORTANT: No code that can fail should be outside the try/catch
 
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
-    $branch = "$(if (!$directCommit) { [System.IO.Path]::GetRandomFileName() })"
+    $branch = ''
+    if (!$directcommit) {
+        # If not direct commit, create a new branch with name, relevant to the current date and base branch, and switch to it
+        $branch = "add-existing-app/$updateBranch/$((Get-Date).ToUniversalTime().ToString(`"yyMMddHHmmss`"))" # e.g. add-existing-app/main/210101120000
+    }
     $serverUrl = CloneIntoNewFolder -actor $actor -token $token -branch $branch
-    $repoBaseFolder = (Get-Location).path
-    $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $repoBaseFolder
+    $baseFolder = (Get-Location).path
+    DownloadAndImportBcContainerHelper -baseFolder $baseFolder
 
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
-    $telemetryScope = CreateScope -eventId 'DO0070' -parentTelemetryScopeJson $parentTelemetryScopeJson 
+    $telemetryScope = CreateScope -eventId 'DO0070' -parentTelemetryScopeJson $parentTelemetryScopeJson
 
     $type = "PTE"
     Write-Host "Reading $RepoSettingsFile"
@@ -119,34 +120,32 @@ try {
         if ($appJson.PSObject.Properties.Name -eq "idRange") {
             $ranges += @($appJson.idRange)
         }
-        
-        $ttype = ""
-        $ranges | Select-Object -First 1 | ForEach-Object {
-            if ($_.from -lt 100000 -and $_.to -lt 100000) {
-                $ttype = "PTE"
-            }
-            else {
-                $ttype = "AppSource App" 
-            }
+
+        # Determine whether the app is PTE or AppSource App based on one of the id ranges (the first)
+        if ($ranges[0].from -lt 100000 -and $ranges[0].to -lt 100000) {
+            $ttype = "PTE"
         }
-        
+        else {
+            $ttype = "AppSource App"
+        }
+
         if ($appJson.PSObject.Properties.Name -eq "dependencies") {
-            $appJson.dependencies | ForEach-Object {
-                if ($_.PSObject.Properties.Name -eq "AppId") {
-                    $id = $_.AppId
+            foreach($dependency in $appJson.dependencies) {
+                if ($dependency.PSObject.Properties.Name -eq "AppId") {
+                    $id = $dependency.AppId
                 }
                 else {
-                    $id = $_.Id
+                    $id = $dependency.Id
                 }
-                if ($testRunnerApps.Contains($id)) { 
+                if ($testRunnerApps.Contains($id)) {
                     $ttype = "Test App"
                 }
             }
         }
 
         if ($ttype -ne "Test App") {
-            Get-ChildItem -Path $appFolder -Filter "*.al" -Recurse | ForEach-Object {
-                $alContent = (Get-Content -Path $_.FullName -Encoding UTF8) -join "`n"
+            foreach($appName in (Get-ChildItem -Path $appFolder -Filter "*.al" -Recurse).FullName) {
+                $alContent = (Get-Content -Path $appName -Encoding UTF8) -join "`n"
                 if ($alContent -like "*codeunit*subtype*=*test*[test]*") {
                     $ttype = "Test App"
                 }
@@ -184,7 +183,7 @@ try {
             try {
                 $settingsJsonFile = Join-Path $projectFolder $ALGoSettingsFile
                 $SettingsJson = Get-Content $settingsJsonFile -Encoding UTF8 | ConvertFrom-Json
-                if (@($settingsJson.appFolders)+@($settingsJson.testFolders)) {
+                if (@($settingsJson.appFolders) + @($settingsJson.testFolders)) {
                     if ($ttype -eq "Test App") {
                         if ($SettingsJson.testFolders -notcontains $foldername) {
                             $SettingsJson.testFolders += @($folderName)
@@ -214,20 +213,19 @@ try {
                     $workspace | Set-JsonContentLF -Path $workspaceFile
                 }
                 catch {
-                   throw "$workspaceFileName is malformed.$([environment]::Newline) $($_.Exception.Message)"
+                    throw "$workspaceFileName is malformed.$([environment]::Newline) $($_.Exception.Message)"
                 }
             }
         }
     }
-    Set-Location $repoBaseFolder
+    Set-Location $baseFolder
     CommitFromNewFolder -serverUrl $serverUrl -commitMessage "Add existing apps ($($appNames -join ', '))" -branch $branch
 
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message "AddExistingApp acion failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
-    TrackException -telemetryScope $telemetryScope -errorRecord $_
-}
-finally {
-    CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
+    if (Get-Module BcContainerHelper) {
+        TrackException -telemetryScope $telemetryScope -errorRecord $_
+    }
+    throw
 }
