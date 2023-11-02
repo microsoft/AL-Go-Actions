@@ -58,8 +58,8 @@ try {
     $containerName = GetContainerName($project)
 
     $ap = "$ENV:GITHUB_ACTION_PATH".Split('\')
-    $branch = $ap[$ap.Count - 2]
-    $owner = $ap[$ap.Count - 4]
+    $branch = $ap[$ap.Count-2]
+    $owner = $ap[$ap.Count-4]
 
     if ($owner -ne "microsoft") {
         $verstr = "dev"
@@ -70,11 +70,11 @@ try {
 
     $runAlPipelineParams = @{
         "sourceRepositoryUrl" = "$ENV:GITHUB_SERVER_URL/$ENV:GITHUB_REPOSITORY"
-        "sourceCommit"        = $ENV:GITHUB_SHA
-        "buildBy"             = "AL-Go for GitHub,$verstr"
-        "buildUrl"            = "$ENV:GITHUB_SERVER_URL/$ENV:GITHUB_REPOSITORY/actions/runs/$ENV:GITHUB_RUN_ID"
+        "sourceCommit" = $ENV:GITHUB_SHA
+        "buildBy" = "AL-Go for GitHub,$verstr"
+        "buildUrl" = "$ENV:GITHUB_SERVER_URL/$ENV:GITHUB_REPOSITORY/actions/runs/$ENV:GITHUB_RUN_ID"
     }
-    if ($project -eq ".") { $project = "" }
+    if ($project  -eq ".") { $project = "" }
     $baseFolder = $ENV:GITHUB_WORKSPACE
     if ($bcContainerHelperConfig.useVolumes -and $bcContainerHelperConfig.hostHelperFolder -eq "HostHelperFolder") {
         $allVolumes = "{$(((docker volume ls --format "'{{.Name}}': '{{.Mountpoint}}'") -join ",").Replace('\','\\').Replace("'",'"'))}" | ConvertFrom-Json | ConvertTo-HashTable
@@ -107,7 +107,7 @@ try {
 
     $appBuild = $settings.appBuild
     $appRevision = $settings.appRevision
-    'licenseFileUrl', 'codeSignCertificateUrl', '*codeSignCertificatePassword', 'keyVaultCertificateUrl', '*keyVaultCertificatePassword', 'keyVaultClientId', 'gitHubPackagesContext', 'applicationInsightsConnectionString' | ForEach-Object {
+    'licenseFileUrl','codeSignCertificateUrl','*codeSignCertificatePassword','keyVaultCertificateUrl','*keyVaultCertificatePassword','keyVaultClientId','gitHubPackagesContext','applicationInsightsConnectionString' | ForEach-Object {
         # Secrets might not be read during Pull Request runs
         if ($secrets.Keys -contains $_) {
             $value = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets."$_"))
@@ -170,7 +170,7 @@ try {
     if (!$settings.doNotSignApps -and $codeSignCertificateUrl -and $codeSignCertificatePassword -and !$settings.keyVaultCodesignCertificateName) {
         OutputWarning -message "Using the legacy CodeSignCertificateUrl and CodeSignCertificatePassword parameters. Consider using the new Azure Keyvault signing instead. Go to https://aka.ms/ALGoSettings#keyVaultCodesignCertificateName to find out more"
         $runAlPipelineParams += @{
-            "CodeSignCertPfxFile"     = $codeSignCertificateUrl
+            "CodeSignCertPfxFile" = $codeSignCertificateUrl
             "CodeSignCertPfxPassword" = ConvertTo-SecureString -string $codeSignCertificatePassword
         }
     }
@@ -182,9 +182,9 @@ try {
 
     if ($keyVaultCertificateUrl -and $keyVaultCertificatePassword -and $keyVaultClientId) {
         $runAlPipelineParams += @{
-            "KeyVaultCertPfxFile"     = $keyVaultCertificateUrl
+            "KeyVaultCertPfxFile" = $keyVaultCertificateUrl
             "keyVaultCertPfxPassword" = ConvertTo-SecureString -string $keyVaultCertificatePassword
-            "keyVaultClientId"        = $keyVaultClientId
+            "keyVaultClientId" = $keyVaultClientId
         }
     }
 
@@ -298,7 +298,7 @@ try {
                     if ($settings."$prop") {
                         Write-Host "Importing config packages from $prop"
                         $settings."$prop" | ForEach-Object {
-                            $configPackage = $_.Split(',')[0].Replace('{COUNTRY}', $country)
+                            $configPackage = $_.Split(',')[0].Replace('{COUNTRY}',$country)
                             $packageId = $_.Split(',')[1]
                             UploadImportAndApply-ConfigPackageInBcContainer `
                                 -containerName $parameters.containerName `
@@ -400,7 +400,7 @@ try {
         -imageName $imageName `
         -bcAuthContext $authContext `
         -environment $environmentName `
-        -artifact $settings.artifact.replace('{INSIDERSASTOKEN}', '') `
+        -artifact $settings.artifact.replace('{INSIDERSASTOKEN}','') `
         -vsixFile $settings.vsixFile `
         -companyName $settings.companyName `
         -memoryLimit $settings.memoryLimit `
@@ -454,7 +454,7 @@ try {
         -imageName $imageName `
         -bcAuthContext $authContext `
         -environment $environmentName `
-        -artifact $settings.artifact.replace('{INSIDERSASTOKEN}', '') `
+        -artifact $settings.artifact.replace('{INSIDERSASTOKEN}','') `
         -vsixFile $settings.vsixFile `
         -companyName $settings.companyName `
         -memoryLimit $settings.memoryLimit `
@@ -462,13 +462,11 @@ try {
         -sharedFolder $sharedFolder `
         -licenseFile $licenseFileUrl `
         -previousApps $previousApps `
+        -installTestApps $installTestApps `
+        -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
         -appFolders $settings.appFolders `
         -testFolders $settings.testFolders `
         -bcptTestFolders $settings.bcptTestFolders `
-        -installTestApps $installTestApps `
-        -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
-        -generateDependencyArtifact:$settings.generateDependencyArtifact `
-        -updateDependencies:$settings.updateDependencies `
         -buildOutputFile $buildOutputFile `
         -containerEventLogFile $containerEventLogFile `
         -testResultsFile $testResultsFile `

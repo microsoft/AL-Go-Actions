@@ -14,7 +14,7 @@ try {
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0077' -parentTelemetryScopeJson $parentTelemetryScopeJson
 
-    if ($project -eq ".") { $project = "" }
+    if ($project  -eq ".") { $project = "" }
 
     $containerName = GetContainerName($project)
     Remove-Bccontainer $containerName
