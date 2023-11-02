@@ -408,21 +408,27 @@ try {
         -sharedFolder $sharedFolder `
         -licenseFile $licenseFileUrl `
         -installApps $installApps `
-        -installOnlyReferencedApps:$repo.installOnlyReferencedApps `
-        -generateDependencyArtifact:$repo.generateDependencyArtifact `
-        -updateDependencies:$repo.updateDependencies `
+        -installTestApps $installTestApps `
+        -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
+        -generateDependencyArtifact:$settings.generateDependencyArtifact `
+        -updateDependencies:$settings.updateDependencies `
         -previousApps $previousApps `
-        -appFolders $repo.appFolders `
+        -appFolders $settings.appFolders `
+        -testFolders $settings.testFolders `
+        -bcptTestFolders $settings.bcptTestFolders `
         -buildOutputFile $buildOutputFile `
         -containerEventLogFile $containerEventLogFile `
-        -customCodeCops $repo.customCodeCops `
+        -testResultsFile $testResultsFile `
+        -testResultsFormat 'JUnit' `
+        -customCodeCops $settings.customCodeCops `
         -gitHubActions `
-        -failOn $repo.failOn `
-        -treatTestFailuresAsWarnings:$repo.treatTestFailuresAsWarnings `
-        -rulesetFile $repo.rulesetFile `
-        -appSourceCopMandatoryAffixes $repo.appSourceCopMandatoryAffixes `
+        -failOn $settings.failOn `
+        -treatTestFailuresAsWarnings:$settings.treatTestFailuresAsWarnings `
+        -rulesetFile $settings.rulesetFile `
+        -enableExternalRulesets:$settings.enableExternalRulesets `
+        -appSourceCopMandatoryAffixes $settings.appSourceCopMandatoryAffixes `
         -additionalCountries $additionalCountries `
-        -obsoleteTagMinAllowedMajorMinor $repo.obsoleteTagMinAllowedMajorMinor `
+        -obsoleteTagMinAllowedMajorMinor $settings.obsoleteTagMinAllowedMajorMinor `
         -buildArtifactFolder $buildArtifactFolder `
         -CreateRuntimePackages:$CreateRuntimePackages `
         -appBuild $appBuild -appRevision $appRevision `
@@ -440,6 +446,7 @@ try {
 
     Write-Host "Invoke Run-AlPipeline with buildmode $buildMode"
     Run-AlPipeline @runAlPipelineParams `
+        -accept_insiderEula `
         -pipelinename $workflowName `
         -containerName $containerName `
         -credential $pipelineDockerCredential `
@@ -447,19 +454,17 @@ try {
         -imageName $imageName `
         -bcAuthContext $authContext `
         -environment $environmentName `
-        -artifact $artifact.replace('{INSIDERSASTOKEN}', $insiderSasToken) `
-        -vsixFile $repo.vsixFile `
-        -companyName $repo.companyName `
-        -memoryLimit $repo.memoryLimit `
+        -artifact $settings.artifact.replace('{INSIDERSASTOKEN}', '') `
+        -vsixFile $settings.vsixFile `
+        -companyName $settings.companyName `
+        -memoryLimit $settings.memoryLimit `
         -baseFolder $projectPath `
         -sharedFolder $sharedFolder `
         -licenseFile $licenseFileUrl `
-        -installTestApps $installTestApps `
-        -installOnlyReferencedApps:$repo.installOnlyReferencedApps `
         -previousApps $previousApps `
-        -appFolders $repo.appFolders `
-        -testFolders $repo.testFolders `
-        -bcptTestFolders $repo.bcptTestFolders `
+        -appFolders $settings.appFolders `
+        -testFolders $settings.testFolders `
+        -bcptTestFolders $settings.bcptTestFolders `
         -installTestApps $installTestApps `
         -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
         -generateDependencyArtifact:$settings.generateDependencyArtifact `
