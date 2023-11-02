@@ -14,22 +14,16 @@ Param(
     [Parameter(HelpMessage = "Set the branch to update", Mandatory = $false)]
     [string] $updateBranch,
     [Parameter(HelpMessage = "Direct Commit (Y/N)", Mandatory = $false)]
-    [bool] $directCommit    
+    [bool] $directCommit
 )
 
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2.0
 $telemetryScope = $null
-$bcContainerHelperPath = $null
-
-# IMPORTANT: No code that can fail should be outside the try/catch
 
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
     . (Join-Path -Path $PSScriptRoot -ChildPath "yamlclass.ps1")
 
-    $baseFolder = $ENV:GITHUB_WORKSPACE
-    $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $baseFolder
+    DownloadAndImportBcContainerHelper
 
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0071' -parentTelemetryScopeJson $parentTelemetryScopeJson
@@ -56,6 +50,14 @@ try {
         $templateUrl = "https://github.com/$templateUrl"
     }
 
+    # DirectALGo is used to determine if the template is a direct link to an AL-Go repository
+    $directALGo = $templateUrl -like 'https://github.com/*/AL-Go@*'
+    if ($directALGo) {
+        if ($templateUrl -like 'https://github.com/microsoft/AL-Go@*' -and -not ($templateUrl -like 'https://github.com/microsoft/AL-Go@*/*')) {
+            throw "You cannot use microsoft/AL-Go as a template repository. Please use a fork of AL-Go instead."
+        }
+    }
+
     # TemplateUrl is now always a full url + @ and a branch name
 
     # CheckForUpdates will read all AL-Go System files from the Template repository and compare them to the ones in the current repository
@@ -69,9 +71,6 @@ try {
 
     # if UpdateSettings is true, we need to update the settings file with the new template url (i.e. there are changes to your AL-Go System files)
     $updateSettings = $true
-    if ($templateUrl.StartsWith('@')) {
-        $templateUrl = "$($repoSettings.templateUrl.Split('@')[0])$templateUrl"
-    }
     if ($repoSettings.templateUrl -eq $templateUrl) {
         # No need to update settings file
         $updateSettings = $false
@@ -81,6 +80,7 @@ try {
 
     $templateBranch = $templateUrl.Split('@')[1]
     $templateUrl = $templateUrl.Split('@')[0]
+    $templateOwner = $templateUrl.Split('/')[3]
 
     # Build the $archiceUrl instead of using the GitHub API
     # The GitHub API has a rate limit of 60 requests per hour, which is not enough for a large number of repositories using AL-Go
@@ -90,14 +90,15 @@ try {
     Write-Host "Using ArchiveUrl $archiveUrl"
 
     # Download the template repository and unpack to a temp folder
-    $headers = @{             
+    $headers = @{
         "Accept" = "application/vnd.github.baptiste-preview+json"
+        "token" = $token
     }
     $tempName = Join-Path ([System.IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
     InvokeWebRequest -Headers $headers -Uri $archiveUrl -OutFile "$tempName.zip" -retry
     Expand-7zipArchive -Path "$tempName.zip" -DestinationPath $tempName
     Remove-Item -Path "$tempName.zip"
-    
+
     # CheckFiles is an array of hashtables with the following properties:
     # dstPath: The path to the file in the current repository
     # srcPath: The path to the file in the template repository
@@ -107,11 +108,23 @@ try {
     # - All files in .github/workflows
     # - All files in .github that ends with .copy.md
     # - All PowerShell scripts in .AL-Go folders (all projects)
+    $srcGitHubPath = '.github'
+    $srcALGoPath = '.AL-Go'
+    if ($directALGo) {
+        # When using a direct link to an AL-Go repository, the files are in a subfolder of the template repository
+        $typePath = $repoSettings.type
+        if ($typePath -eq "PTE") {
+            $typePath = "Per Tenant Extension"
+        }
+        $srcGitHubPath = Join-Path "Templates/$typePath" $srcGitHubPath
+        $srcALGoPath = Join-Path "Templates/$typePath" $srcALGoPath
+    }
     $checkfiles = @(
-        @{ "dstPath" = Join-Path ".github" "workflows"; "srcPath" = Join-Path ".github" "workflows"; "pattern" = "*"; "type" = "workflow" },
-        @{ "dstPath" = ".github"; "srcPath" = ".github"; "pattern" = "*.copy.md"; "type" = "releasenotes" }
+        @{ "dstPath" = Join-Path ".github" "workflows"; "srcPath" = Join-Path $srcGitHubPath 'workflows'; "pattern" = "*"; "type" = "workflow" },
+        @{ "dstPath" = ".github"; "srcPath" = $srcGitHubPath; "pattern" = "*.copy.md"; "type" = "releasenotes" }
     )
     # Get the list of projects in the current repository
+    $baseFolder = $ENV:GITHUB_WORKSPACE
     if ($repoSettings.projects) {
         $projects = $repoSettings.projects
     }
@@ -123,7 +136,7 @@ try {
         $projects += @(".")
     }
     $projects | ForEach-Object {
-        $checkfiles += @(@{ "dstPath" = Join-Path $_ ".AL-Go"; "srcPath" = ".AL-Go"; "pattern" = "*.ps1"; "type" = "script" })
+        $checkfiles += @(@{ "dstPath" = Join-Path $_ ".AL-Go"; "srcPath" = $srcALGoPath; "pattern" = "*.ps1"; "type" = "script" })
     }
 
     # $updateFiles will hold an array of files, which needs to be updated
@@ -144,7 +157,7 @@ try {
         $buildAlso = @{}
         $projectDependencies = @{}
         $projectsOrder = AnalyzeProjectDependencies -baseFolder $baseFolder -projects $projects -buildAlso ([ref]$buildAlso) -projectDependencies ([ref]$projectDependencies)
-        
+
         $depth = $projectsOrder.Count
         Write-Host "Calculated dependency depth to be $depth"
     }
@@ -203,16 +216,22 @@ try {
                         }
                     }
 
-                    # The PullRequestHandler workflow can have a RepoSetting called CICDPullRequestBranches, which will be used to set the branches for the workflow
                     if ($baseName -eq "PullRequestHandler") {
+                        # The PullRequestHandler workflow can have a RepoSetting called PullRequestTrigger which specifies the trigger to use for Pull Requests
+                        $triggerSection = $yaml.Get('on:/pull')
+                        $triggerSection.content = "$($repoSettings.PullRequestTrigger):"
+                        $yaml.Replace('on:/pull', $triggerSection.Content)
+
+                        # The PullRequestHandler workflow can have a RepoSetting called CICDPullRequestBranches, which will be used to set the branches for the workflow
                         if ($repoSettings.Keys -contains 'CICDPullRequestBranches') {
                             $CICDPullRequestBranches = $repoSettings.CICDPullRequestBranches
                         }
                         else {
                             $CICDPullRequestBranches = $defaultCICDPullRequestBranches
                         }
+
                         # update the branches: line with the new branches
-                        $yaml.Replace('on:/pull_request_target:/branches:', "branches: [ '$($cicdPullRequestBranches -join "', '")' ]")
+                        $yaml.Replace("on:/$($repoSettings.PullRequestTrigger):/branches:", "branches: [ '$($CICDPullRequestBranches -join "', '")' ]")
                     }
 
                     # Repo Setting runs-on and shell determines which GitHub runner is used for all non-build jobs (build jobs are run using the GitHubRunner/GitHubRunnerShell repo settings)
@@ -241,7 +260,7 @@ try {
 
                         if ($depth -gt 1) {
                             # Also, duplicate the build job for each dependency depth
-                            
+
                             $build = $yaml.Get('jobs:/Build:/')
                             if($build)
                             {
@@ -280,7 +299,7 @@ try {
                                     $build.Replace('if:', $if)
                                     $build.Replace('needs:', "needs: [ $($needs -join ', ') ]")
                                     $build.Replace('strategy:/matrix:/include:',"include: `${{ fromJson(needs.Initialization.outputs.buildOrderJson)[$index].buildDimensions }}")
-                                    
+
                                     # Last build job is called build, all other build jobs are called build1, build2, etc.
                                     if ($depth -eq $_) {
                                         $newBuild += @("Build:")
@@ -303,6 +322,41 @@ try {
                 else {
                     # For non-workflow files, just read the file content
                     $srcContent = Get-ContentLF -Path $srcFile
+                }
+
+                $srcContent = $srcContent.Replace('{TEMPLATEURL}', "$($templateUrl)@$($templateBranch)")
+                if ($directALGo) {
+                    # If we are using the direct AL-Go repo, we need to change the owner and repo names in the workflow
+                    $lines = $srcContent.Split("`n")
+
+                    # The Original Owner and Repo in the AL-Go repository are microsoft/AL-Go-Actions, microsoft/AL-Go-PTE and microsoft/AL-Go-AppSource
+                    $originalOwnerAndRepo = @{
+                        "actionsRepo" = "microsoft/AL-Go-Actions"
+                        "perTenantExtensionRepo" = "microsoft/AL-Go-PTE"
+                        "appSourceAppRepo" = "microsoft/AL-Go-AppSource"
+                    }
+                    # Original branch is always main
+                    $originalBranch = "main"
+
+                    # Modify the file to use repository names based on whether or not we are using the direct AL-Go repo
+                    $templateRepos = @{
+                        "actionsRepo" = "AL-Go/Actions"
+                        "perTenantExtensionRepo" = "AL-Go"
+                        "appSourceAppRepo" = "AL-Go"
+                    }
+
+                    # Replace URL's to actions repository first
+                    $regex = "^(.*)https:\/\/raw\.githubusercontent\.com\/microsoft\/AL-Go-Actions\/$originalBranch(.*)$"
+                    $replace = "`${1}https://raw.githubusercontent.com/$($templateOwner)/AL-Go/$($templateBranch)/Actions`${2}"
+                    $lines = $lines | ForEach-Object { $_ -replace $regex, $replace }
+
+                    # Replace the owner and repo names in the workflow
+                    "actionsRepo","perTenantExtensionRepo","appSourceAppRepo" | ForEach-Object {
+                        $regex = "^(.*)$($originalOwnerAndRepo."$_")(.*)$originalBranch(.*)$"
+                        $replace = "`${1}$($templateOwner)/$($templateRepos."$_")`${2}$($templateBranch)`${3}"
+                        $lines = $lines | ForEach-Object { $_ -replace $regex, $replace }
+                    }
+                    $srcContent = $lines -join "`n"
                 }
 
                 $dstFile = Join-Path $dstFolder $fileName
@@ -371,7 +425,7 @@ try {
 
                 # checkout branch to update
                 invoke-git checkout $updateBranch
-                
+
                 # If $directCommit, then changes are made directly to the default branch
                 if (!$directcommit) {
                     # If not direct commit, create a new branch with name, relevant to the current date and base branch, and switch to it
@@ -404,37 +458,34 @@ try {
                 # Update the files
                 # Calculate the release notes, while updating
                 $releaseNotes = ""
-                try {
-                    $updateFiles | ForEach-Object {
-                        # Create the destination folder if it doesn't exist
-                        $path = [System.IO.Path]::GetDirectoryName($_.DstFile)
-                        if (-not (Test-Path -path $path -PathType Container)) {
-                            New-Item -Path $path -ItemType Directory | Out-Null
-                        }
-                        if (([System.IO.Path]::GetFileName($_.DstFile) -eq "RELEASENOTES.copy.md") -and (Test-Path $_.DstFile)) {
-                            $oldReleaseNotes = Get-ContentLF -Path $_.DstFile
-                            while ($oldReleaseNotes) {
-                                $releaseNotes = $_.Content
-                                if ($releaseNotes.indexOf($oldReleaseNotes) -gt 0) {
-                                    $releaseNotes = $releaseNotes.SubString(0, $releaseNotes.indexOf($oldReleaseNotes))
-                                    $oldReleaseNotes = ""
+                $updateFiles | ForEach-Object {
+                    # Create the destination folder if it doesn't exist
+                    $path = [System.IO.Path]::GetDirectoryName($_.DstFile)
+                    if (-not (Test-Path -path $path -PathType Container)) {
+                        New-Item -Path $path -ItemType Directory | Out-Null
+                    }
+                    if (([System.IO.Path]::GetFileName($_.DstFile) -eq "RELEASENOTES.copy.md") -and (Test-Path $_.DstFile)) {
+                        $oldReleaseNotes = Get-ContentLF -Path $_.DstFile
+                        while ($oldReleaseNotes) {
+                            $releaseNotes = $_.Content
+                            if ($releaseNotes.indexOf($oldReleaseNotes) -gt 0) {
+                                $releaseNotes = $releaseNotes.SubString(0, $releaseNotes.indexOf($oldReleaseNotes))
+                                $oldReleaseNotes = ""
+                            }
+                            else {
+                                $idx = $oldReleaseNotes.IndexOf("`n## ")
+                                if ($idx -gt 0) {
+                                    $oldReleaseNotes = $oldReleaseNotes.Substring($idx)
                                 }
                                 else {
-                                    $idx = $oldReleaseNotes.IndexOf("`n## ")
-                                    if ($idx -gt 0) {
-                                        $oldReleaseNotes = $oldReleaseNotes.Substring($idx)
-                                    }
-                                    else {
-                                        $oldReleaseNotes = ""
-                                    }
+                                    $oldReleaseNotes = ""
                                 }
                             }
                         }
-                        Write-Host "Update $($_.DstFile)"
-                        $_.Content | Set-ContentLF -Path $_.DstFile
                     }
+                    Write-Host "Update $($_.DstFile)"
+                    $_.Content | Set-ContentLF -Path $_.DstFile
                 }
-                catch {}
                 if ($releaseNotes -eq "") {
                     $releaseNotes = "No release notes available!"
                 }
@@ -484,9 +535,8 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message "CheckForUpdates action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
-    TrackException -telemetryScope $telemetryScope -errorRecord $_
-}
-finally {
-    CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
+    if (Get-Module BcContainerHelper) {
+        TrackException -telemetryScope $telemetryScope -errorRecord $_
+    }
+    throw
 }

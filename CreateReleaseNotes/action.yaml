@@ -8,10 +8,6 @@ inputs:
     description: Shell in which you want to run the action (powershell or pwsh)
     required: false
     default: powershell
-  actor:
-    description: The GitHub actor running the action
-    required: false
-    default: ${{ github.actor }}
   token:
     description: The GitHub token running the action
     required: false
@@ -20,13 +16,13 @@ inputs:
     description: Specifies the parent telemetry scope for the telemetry signal
     required: false
     default: '7b7d'
-  workflowToken:
-    description: A GitHub token with permissions to modify workflows
-    required: false
-    default: ''
   tag_name:
     description: Tag name
     required: true
+  target_commitish:
+    description: Last commit to include in release notes
+    required: false
+    default: ''
 outputs:
   ReleaseBranch:
     description: Name of the release branch
@@ -41,12 +37,19 @@ runs:
       shell: ${{ inputs.shell }}
       id: createreleasenotes
       env:
-        _actor: ${{ inputs.actor }}
         _token: ${{ inputs.token }}
         _parentTelemetryScopeJson: ${{ inputs.parentTelemetryScopeJson }}
-        _workflowToken: ${{ inputs.workflowToken }}
         _tag_name: ${{ inputs.tag_name }}
-      run: try { ${{ github.action_path }}/CreateReleaseNotes.ps1 -actor $ENV:_actor -token $ENV:_token -parentTelemetryScopeJson $ENV:_parentTelemetryScopeJson -workflowToken $ENV:_workflowToken -tag_name $ENV:_tag_name } catch { Write-Host "::Error::Unexpected error when running action ($($_.Exception.Message.Replace("`r",'').Replace("`n",' ')))"; exit 1 }
+        _target_commitish: ${{ inputs.target_commitish }}
+      run: |
+        $errorActionPreference = "Stop"; $ProgressPreference = "SilentlyContinue"; Set-StrictMode -Version 2.0
+        try {
+          ${{ github.action_path }}/CreateReleaseNotes.ps1 -token $ENV:_token -parentTelemetryScopeJson $ENV:_parentTelemetryScopeJson -tag_name $ENV:_tag_name -target_commitish $ENV:_target_commitish
+        }
+        catch {
+          Write-Host "::ERROR::Unexpected error when running action. Error Message: $($_.Exception.Message.Replace("`r",'').Replace("`n",' ')), StackTrace: $($_.ScriptStackTrace.Replace("`r",'').Replace("`n",' <- '))";
+          exit 1
+        }
 branding:
   icon: terminal
   color: blue

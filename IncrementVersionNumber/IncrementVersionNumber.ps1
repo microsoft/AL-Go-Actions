@@ -9,27 +9,28 @@ Param(
     [string] $project = '*',
     [Parameter(HelpMessage = "Updated Version Number. Use Major.Minor for absolute change, use +Major.Minor for incremental change.", Mandatory = $true)]
     [string] $versionnumber,
+    [Parameter(HelpMessage = "Set the branch to update", Mandatory = $false)]
+    [string] $updateBranch,
     [Parameter(HelpMessage = "Direct commit (Y/N)", Mandatory = $false)]
     [bool] $directCommit
 )
 
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version 2.0
 $telemetryScope = $null
-$bcContainerHelperPath = $null
-
-# IMPORTANT: No code that can fail should be outside the try/catch
 
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
-    $branch = "$(if (!$directCommit) { [System.IO.Path]::GetRandomFileName() })"
+    $branch = ''
+    if (!$directcommit) {
+        # If not direct commit, create a new branch with name, relevant to the current date and base branch, and switch to it
+        $branch = "increment-version-number/$updateBranch/$((Get-Date).ToUniversalTime().ToString(`"yyMMddHHmmss`"))" # e.g. increment-version-number/main/210101120000
+    }
     $serverUrl = CloneIntoNewFolder -actor $actor -token $token -branch $branch
-    $repoBaseFolder = (Get-Location).path
-    $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $repoBaseFolder
+    $baseFolder = (Get-Location).path
+    DownloadAndImportBcContainerHelper -baseFolder $baseFolder
 
     import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
     $telemetryScope = CreateScope -eventId 'DO0076' -parentTelemetryScopeJson $parentTelemetryScopeJson
-    
+
     $addToVersionNumber = "$versionnumber".StartsWith('+')
     if ($addToVersionNumber) {
         $versionnumber = $versionnumber.Substring(1)
@@ -44,7 +45,7 @@ try {
     if (!$project) { $project = '*' }
 
     if ($project -ne '.') {
-        $projects = @(Get-ChildItem -Path $repoBaseFolder -Directory -Recurse -Depth 2 | Where-Object { Test-Path (Join-Path $_.FullName ".AL-Go/settings.json") -PathType Leaf } | ForEach-Object { $_.FullName.Substring($repoBaseFolder.length+1) } | Where-Object { $_ -like $project })
+        $projects = @(Get-ChildItem -Path $baseFolder -Directory -Recurse -Depth 2 | Where-Object { Test-Path (Join-Path $_.FullName ".AL-Go/settings.json") -PathType Leaf } | ForEach-Object { $_.FullName.Substring($baseFolder.length+1) } | Where-Object { $_ -like $project })
         if ($projects.Count -eq 0) {
             if ($project -eq '*') {
                 $projects = @( '.' )
@@ -128,9 +129,8 @@ try {
     TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    OutputError -message "IncrementVersionNumber action failed.$([environment]::Newline)Error: $($_.Exception.Message)$([environment]::Newline)Stacktrace: $($_.scriptStackTrace)"
-    TrackException -telemetryScope $telemetryScope -errorRecord $_
-}
-finally {
-    CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
+    if (Get-Module BcContainerHelper) {
+        TrackException -telemetryScope $telemetryScope -errorRecord $_
+    }
+    throw
 }

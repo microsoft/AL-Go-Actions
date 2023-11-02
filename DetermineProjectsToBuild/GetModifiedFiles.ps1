@@ -10,14 +10,14 @@ if(!$env:GITHUB_EVENT_PATH) {
 
 $ghEvent = Get-Content $env:GITHUB_EVENT_PATH -Encoding UTF8 | ConvertFrom-Json
 
-if(!$ghEvent.pull_request) {
+if(-not ($ghEvent.PSObject.Properties.name -eq 'pull_request')) {
     Write-Host "Not a pull request, returning empty list of changed files"
     return @()
 }
 
 $url = "$($env:GITHUB_API_URL)/repos/$($env:GITHUB_REPOSITORY)/compare/$($ghEvent.pull_request.base.sha)...$($ghEvent.pull_request.head.sha)"
 
-$headers = @{             
+$headers = @{
     "Authorization" = "token $token"
     "Accept" = "application/vnd.github.baptiste-preview+json"
 }

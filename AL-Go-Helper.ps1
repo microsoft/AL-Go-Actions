@@ -8,13 +8,14 @@ if (Test-Path $gitHubHelperPath) {
     # If we are adding more dependencies here, then localDevEnv and cloudDevEnv needs to be updated
 }
 
-$ErrorActionPreference = "stop"
-Set-StrictMode -Version 2.0
+$errorActionPreference = "Stop"; $ProgressPreference = "SilentlyContinue"; Set-StrictMode -Version 2.0
 
 $ALGoFolderName = '.AL-Go'
 $ALGoSettingsFile = Join-Path '.AL-Go' 'settings.json'
 $RepoSettingsFile = Join-Path '.github' 'AL-Go-Settings.json'
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'defaultCICDPushBranches', Justification = 'False positive.')]
 $defaultCICDPushBranches = @( 'main', 'release/*', 'feature/*' )
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'defaultCICDPullRequestBranches', Justification = 'False positive.')]
 $defaultCICDPullRequestBranches = @( 'main' )
 $runningLocal = $local.IsPresent
 $defaultBcContainerHelperVersion = "latest" # Must be double quotes. Will be replaced by BcContainerHelperVersion if necessary in the deploy step
@@ -35,6 +36,8 @@ $runAlPipelineOverrides = @(
     "GetBcContainerAppRuntimePackage"
     "RemoveBcContainer"
     "InstallMissingDependencies"
+    "PreCompileApp"
+    "PostCompileApp"
 )
 
 # Well known AppIds
@@ -57,63 +60,95 @@ $testRunnerApps = @($permissionsMockAppId, $testRunnerAppId) + $performanceToolk
 
 $isPsCore = $PSVersionTable.PSVersion -ge "6.0.0"
 if ($isPsCore) {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'byteEncodingParam', Justification = 'False positive.')]
     $byteEncodingParam = @{ "asByteStream" = $true }
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'allowUnencryptedAuthenticationParam', Justification = 'False positive.')]
     $allowUnencryptedAuthenticationParam = @{ "allowUnencryptedAuthentication" = $true }
 }
 else {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'byteEncodingParam', Justification = 'False positive.')]
     $byteEncodingParam = @{ "Encoding" = "byte" }
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'allowUnencryptedAuthenticationParam', Justification = 'False positive.')]
     $allowUnencryptedAuthenticationParam = @{ }
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidAssignmentToAutomaticVariable', 'isWindows', Justification = 'Will only run on PS5')]
     $isWindows = $true
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidAssignmentToAutomaticVariable', 'isLinux', Justification = 'Will only run on PS5')]
     $isLinux = $false
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidAssignmentToAutomaticVariable', 'isMacOS', Justification = 'Will only run on PS5')]
     $IsMacOS = $false
 }
 
 # Copy a HashTable to ensure non case sensitivity (Issue #385)
 function Copy-HashTable() {
     [CmdletBinding()]
+    [OutputType([System.Collections.HashTable])]
     Param(
         [parameter(ValueFromPipeline)]
         [hashtable] $object
     )
-    $ht = @{}
-    if ($object) {
-        $object.Keys | ForEach-Object { 
-            $ht[$_] = $object[$_]
+    Process {
+        $ht = @{}
+        if ($object) {
+            $object.Keys | ForEach-Object {
+                $ht[$_] = $object[$_]
+            }
         }
+        $ht
     }
-    $ht
 }
 
 function ConvertTo-HashTable() {
     [CmdletBinding()]
+    [OutputType([System.Collections.HashTable])]
     Param(
         [parameter(ValueFromPipeline)]
         $object,
         [switch] $recurse
     )
 
-    $ht = @{}
-    if ($object -is [System.Collections.Specialized.OrderedDictionary] -or $object -is [hashtable]) {
-        $object.Keys | ForEach-Object {
-            if ($recurse -and ($object."$_" -is [System.Collections.Specialized.OrderedDictionary] -or $object."$_" -is [hashtable] -or $object."$_" -is [PSCustomObject])) {
-                $ht[$_] = ConvertTo-HashTable $object."$_" -recurse
+    Process {
+        function AddValueToHashTable {
+            Param(
+                [hashtable] $ht,
+                [string] $name,
+                $value,
+                [switch] $recurse
+            )
+
+            if ($ht.Contains($name)) {
+                throw "Duplicate key $name"
+            }
+            if ($recurse -and ($value -is [System.Collections.Specialized.OrderedDictionary] -or $value -is [hashtable] -or $value -is [System.Management.Automation.PSCustomObject])) {
+                $ht[$name] = ConvertTo-HashTable $value -recurse
+            }
+            elseif ($recurse -and $value -is [array]) {
+                $ht[$name] = @($value | ForEach-Object {
+                    if (($_ -is [System.Collections.Specialized.OrderedDictionary]) -or ($_ -is [hashtable]) -or ($_ -is [System.Management.Automation.PSCustomObject])) {
+                        ConvertTo-HashTable $_ -recurse
+                    }
+                    else {
+                        $_
+                    }
+                })
             }
             else {
-                $ht[$_] = $object."$_"
+                $ht[$name] = $value
             }
         }
-    }
-    elseif ($object -is [PSCustomObject]) {
-        $object.PSObject.Properties | ForEach-Object {
-            if ($recurse -and ($_.Value -is [System.Collections.Specialized.OrderedDictionary] -or $_.Value -is [hashtable] -or $_.Value -is [PSCustomObject])) {
-                $ht[$_.Name] = ConvertTo-HashTable $_.Value -recurse
-            }
-            else {
-                $ht[$_.Name] = $_.Value
+
+        $ht = @{}
+        if ($object -is [System.Collections.Specialized.OrderedDictionary] -or $object -is [hashtable]) {
+            foreach($key in $object.Keys) {
+                AddValueToHashTable -ht $ht -name $key -value $object."$key" -recurse:$recurse
             }
         }
+        elseif ($object -is [System.Management.Automation.PSCustomObject]) {
+            foreach($property in $object.PSObject.Properties) {
+                AddValueToHashTable -ht $ht -name $property.Name -value $property.Value -recurse:$recurse
+            }
+        }
+        $ht
     }
-    $ht
 }
 
 function OutputError {
@@ -188,7 +223,7 @@ function stringToInt {
     )
 
     $i = 0
-    if ([int]::TryParse($str.Trim(), [ref] $i)) { 
+    if ([int]::TryParse($str.Trim(), [ref] $i)) {
         $i
     }
     else {
@@ -227,102 +262,159 @@ function Expand-7zipArchive {
     }
 }
 
-function DownloadAndImportBcContainerHelper {
-    Param(
-        [string] $bcContainerHelperVersion = $defaultBcContainerHelperVersion,
-        [string] $baseFolder = ""
-    )
-
-    $params = @{ "ExportTelemetryFunctions" = $true }
-    if ($baseFolder) {
-        $repoSettingsPath = Join-Path $baseFolder $repoSettingsFile
-        if (-not (Test-Path $repoSettingsPath -PathType Leaf)) {
-            $repoSettingsPath = Join-Path $baseFolder "..\$repoSettingsFile"
-            if (-not (Test-Path $repoSettingsPath -PathType Leaf)) {
-                $repoSettingsPath = Join-Path $baseFolder "..\..\$repoSettingsFile"
-            }
-        }
-        if (Test-Path $repoSettingsPath) {
-            $repoSettings = Get-Content $repoSettingsPath -Encoding UTF8 | ConvertFrom-Json | ConvertTo-HashTable
-            if ($bcContainerHelperVersion -eq "" -or $bcContainerHelperVersion -eq "latest") {
-                if ($repoSettings.Keys -contains "BcContainerHelperVersion") {
-                    $bcContainerHelperVersion = $repoSettings.BcContainerHelperVersion
-                    Write-Host "Using BcContainerHelper $bcContainerHelperVersion version"
-                    if ($bcContainerHelperVersion -like "https://*") {
-                        throw "Setting BcContainerHelperVersion to a URL is not allowed."
-                    }
-                    elseif ($bcContainerHelperVersion -ne "" -and $bcContainerHelperVersion -ne 'latest' -and $bcContainerHelperVersion -ne 'preview') {
-                        Write-Host "::Warning::Using a specific version of BcContainerHelper is not recommended and will lead to build failures in the future. Consider removing the setting."
-                    }
-                }
-            }
-            $params += @{ "bcContainerHelperConfigFile" = $repoSettingsPath }
-        }
-    }
-    if ($bcContainerHelperVersion -eq "") {
-        $bcContainerHelperVersion = "latest"
-    }
-    elseif ($bcContainerHelperVersion -eq "private") {
-        # Using a private BcContainerHelper version grabs a fork of BcContainerHelper with the same owner as the AL-Go actions
-        # The ActionsRepo below will be modified to point to actual running actions repo by the deploy mechanism, please do not change
-        $ActionsRepo = "microsoft/AL-Go-Actions@v3.1"
-        $owner = $actionsRepo.Split('/')[0]
-        $bcContainerHelperVersion = "https://github.com/$owner/navcontainerhelper/archive/master.zip"
+#
+# Get Path to BcContainerHelper module (download if necessary)
+#
+# If $env:BcContainerHelperPath is set, it will be reused (ignoring the ContainerHelperVersion)
+#
+# ContainerHelperVersion can be:
+# - preview (or dev), which will use the preview version downloaded from bccontainerhelper blob storage
+# - latest, which will use the latest version downloaded from bccontainerhelper blob storage
+# - a specific version, which will use the specific version downloaded from bccontainerhelper blob storage
+# - none, which will use the BcContainerHelper module installed on the build agent
+# - https://... - direct download url to a zip file containing the BcContainerHelper module
+#
+# When using direct download url, the module will be downloaded to a temp folder and will not be cached
+# When using none, the module will be located in modules and used from there
+# When using preview, latest or a specific version number, the module will be downloaded to a cache folder and will be reused if the same version is requested again
+# This is to avoid filling up the temp folder with multiple identical versions of BcContainerHelper
+# The cache folder is C:\ProgramData\BcContainerHelper on Windows and /home/<username>/.BcContainerHelper on Linux
+# A Mutex will be used to ensure multiple agents aren't fighting over the same cache folder
+#
+# This function will set $env:BcContainerHelperPath, which is the path to the BcContainerHelper.ps1 file for reuse in subsequent calls
+#
+function GetBcContainerHelperPath([string] $bcContainerHelperVersion) {
+    if ("$env:BcContainerHelperPath" -and (Test-Path -Path $env:BcContainerHelperPath -PathType Leaf)) {
+        return $env:BcContainerHelperPath
     }
 
-    if ($bcContainerHelperVersion -eq "none") {
-        $tempName = ""
+    if ($bcContainerHelperVersion -eq 'None') {
         $module = Get-Module BcContainerHelper
         if (-not $module) {
             OutputError "When setting BcContainerHelperVersion to none, you need to ensure that BcContainerHelper is installed on the build agent"
         }
-
-        $BcContainerHelperPath = Join-Path (Split-Path $module.Path -parent) "BcContainerHelper.ps1" -Resolve
+        $bcContainerHelperPath = Join-Path (Split-Path $module.Path -parent) "BcContainerHelper.ps1" -Resolve
     }
     else {
-        $tempName = Join-Path ([System.IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
+        if ($isWindows) {
+            $bcContainerHelperRootFolder = 'C:\ProgramData\BcContainerHelper'
+        }
+        else {
+            $myUsername = (whoami)
+            $bcContainerHelperRootFolder = "/home/$myUsername/.BcContainerHelper"
+        }
+        if (!(Test-Path $bcContainerHelperRootFolder)) {
+            New-Item -Path $bcContainerHelperRootFolder -ItemType Directory | Out-Null
+        }
+
         $webclient = New-Object System.Net.WebClient
         if ($bcContainerHelperVersion -like "https://*") {
+            # Use temp space for private versions
+            $tempName = Join-Path ([System.IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
             Write-Host "Downloading BcContainerHelper developer version from $bcContainerHelperVersion"
             try {
                 $webclient.DownloadFile($bcContainerHelperVersion, "$tempName.zip")
             }
             catch {
+                $tempName = Join-Path $bcContainerHelperRootFolder ([Guid]::NewGuid().ToString())
                 $bcContainerHelperVersion = "preview"
                 Write-Host "Download failed, downloading BcContainerHelper $bcContainerHelperVersion version from Blob Storage"
                 $webclient.DownloadFile("https://bccontainerhelper.blob.core.windows.net/public/$($bcContainerHelperVersion).zip", "$tempName.zip")
             }
         }
-        elseif ($bcContainerHelperVersion -eq "preview" -or $bcContainerHelperVersion -eq "dev") {
-            # For backwards compatibility, use preview when dev is specified
-            Write-Host "Downloading BcContainerHelper $bcContainerHelperVersion version from Blob Storage"
-            $webclient.DownloadFile("https://bccontainerhelper.blob.core.windows.net/public/preview.zip", "$tempName.zip")
-        }
         else {
-            Write-Host "Downloading BcContainerHelper $bcContainerHelperVersion version from CDN"
-            $webclient.DownloadFile("https://bccontainerhelper.azureedge.net/public/$($bcContainerHelperVersion).zip", "$tempName.zip")
+            $tempName = Join-Path $bcContainerHelperRootFolder ([Guid]::NewGuid().ToString())
+            if ($bcContainerHelperVersion -eq "preview" -or $bcContainerHelperVersion -eq "dev") {
+                # For backwards compatibility, use preview when dev is specified
+                Write-Host "Downloading BcContainerHelper $bcContainerHelperVersion version from Blob Storage"
+                $webclient.DownloadFile("https://bccontainerhelper.blob.core.windows.net/public/preview.zip", "$tempName.zip")
+            }
+            else {
+                Write-Host "Downloading BcContainerHelper $bcContainerHelperVersion version from CDN"
+                $webclient.DownloadFile("https://bccontainerhelper.azureedge.net/public/$($bcContainerHelperVersion).zip", "$tempName.zip")
+            }
         }
         Expand-7zipArchive -Path "$tempName.zip" -DestinationPath $tempName
-        $BcContainerHelperPath = (Get-Item -Path (Join-Path $tempName "*\BcContainerHelper.ps1")).FullName
+        $bcContainerHelperPath = (Get-Item -Path (Join-Path $tempName "*\BcContainerHelper.ps1")).FullName
         Remove-Item -Path "$tempName.zip" -ErrorAction SilentlyContinue
+        if ($bcContainerHelperVersion -notlike "https://*") {
+            # Check whether the version is already available in the cache
+            $version = ([System.IO.File]::ReadAllText((Join-Path $tempName 'BcContainerHelper/Version.txt'), [System.Text.Encoding]::UTF8)).Trim()
+            $cacheFolder = Join-Path $bcContainerHelperRootFolder $version
+            # To avoid two agents on the same machine downloading the same version at the same time, use a mutex
+            $buildMutexName = "DownloadAndImportBcContainerHelper"
+            $buildMutex = New-Object System.Threading.Mutex($false, $buildMutexName)
+            try {
+                try {
+                    if (!$buildMutex.WaitOne(1000)) {
+                        Write-Host "Waiting for other process loading BcContainerHelper"
+                        $buildMutex.WaitOne() | Out-Null
+                        Write-Host "Other process completed loading BcContainerHelper"
+                    }
+                }
+                catch [System.Threading.AbandonedMutexException] {
+                    Write-Host "Other process terminated abnormally"
+                }
+                if (Test-Path $cacheFolder) {
+                    Remove-Item $tempName -Recurse -Force
+                }
+                else {
+                    Rename-Item -Path $tempName -NewName $version
+                }
+            }
+            finally {
+                $buildMutex.ReleaseMutex()
+            }
+            $bcContainerHelperPath = Join-Path $cacheFolder "BcContainerHelper/BcContainerHelper.ps1"
+        }
     }
-    . $BcContainerHelperPath @params
-    $tempName
+    $env:BcContainerHelperPath = $bcContainerHelperPath
+    if ($ENV:GITHUB_ENV) {
+        Add-Content -Encoding UTF8 -Path $ENV:GITHUB_ENV "BcContainerHelperPath=$bcContainerHelperPath"
+    }
+    return $bcContainerHelperPath
 }
 
-function CleanupAfterBcContainerHelper {
-    Param(
-        [string] $bcContainerHelperPath
-    )
+#
+# Download and import the BcContainerHelper module based on repository settings
+# baseFolder is the repository baseFolder
+#
+function DownloadAndImportBcContainerHelper([string] $baseFolder = $ENV:GITHUB_WORKSPACE) {
+    $params = @{ "ExportTelemetryFunctions" = $true }
+    $repoSettingsPath = Join-Path $baseFolder $repoSettingsFile
 
-    if ($bcContainerHelperPath) {
-        try {
-            Write-Host "Removing BcContainerHelper"
-            Remove-Module BcContainerHelper
-            Remove-Item $bcContainerHelperPath -Recurse -Force
+    # Default BcContainerHelper Version is hardcoded in AL-Go-Helper (replaced during AL-Go deploy)
+    $bcContainerHelperVersion = $defaultBcContainerHelperVersion
+    if (Test-Path $repoSettingsPath) {
+        # Read Repository Settings file (without applying organization variables, repository variables or project settings files)
+        # Override default BcContainerHelper version from AL-Go-Helper only if new version is specifically specified in repo settings file
+        $repoSettings = Get-Content $repoSettingsPath -Encoding UTF8 | ConvertFrom-Json | ConvertTo-HashTable
+        if ($repoSettings.Keys -contains "BcContainerHelperVersion") {
+            $bcContainerHelperVersion = $repoSettings.BcContainerHelperVersion
+            Write-Host "Using BcContainerHelper $bcContainerHelperVersion version"
+            if ($bcContainerHelperVersion -like "https://*") {
+                throw "Setting BcContainerHelperVersion to a URL in settings is not allowed. Fork the AL-Go repository and use direct AL-Go development instead."
+            }
         }
-        catch {}
+        $params += @{ "bcContainerHelperConfigFile" = $repoSettingsPath }
     }
+
+    if ($bcContainerHelperVersion -eq '') {
+        $bcContainerHelperVersion = "latest"
+    }
+
+    if ($bcContainerHelperVersion -eq 'private') {
+        throw "ContainerHelperVersion private is no longer supported. Use direct AL-Go development and a direct download url instead."
+    }
+
+    if ($bcContainerHelperVersion -ne 'latest' -and $bcContainerHelperVersion -ne 'preview') {
+        Write-Host "::Warning::Using a specific version of BcContainerHelper is not recommended and will lead to build failures in the future. Consider removing the setting."
+    }
+
+    $bcContainerHelperPath = GetBcContainerHelperPath -bcContainerHelperVersion $bcContainerHelperVersion
+
+    Write-Host "Import from $bcContainerHelperPath"
+    . $bcContainerHelperPath @params
 }
 
 function MergeCustomObjectIntoOrderedDictionary {
@@ -421,11 +513,11 @@ function ReadSettings {
         [string] $repoSettingsVariableValue = "$ENV:ALGoRepoSettings"
     )
 
-    function GetSettingsObject  { 
+    function GetSettingsObject {
         Param(
             [string] $path
         )
-        
+
         if (Test-Path $path) {
             try {
                 Write-Host "Applying settings from $path"
@@ -438,6 +530,9 @@ function ReadSettings {
                 throw "Error reading $path. Error was $($_.Exception.Message).`n$($_.ScriptStackTrace)"
             }
         }
+        else {
+            Write-Host "No settings found in $path"
+        }
         return $null
     }
 
@@ -447,81 +542,86 @@ function ReadSettings {
 
     # Start with default settings
     $settings = [ordered]@{
-        "type"                                   = "PTE"
-        "unusedALGoSystemFiles"                  = @()
-        "projects"                               = @()
-        "country"                                = "us"
-        "artifact"                               = ""
-        "companyName"                            = ""
-        "repoVersion"                            = "1.0"
-        "repoName"                               = $repoName
-        "versioningStrategy"                     = 0
-        "runNumberOffset"                        = 0
-        "appBuild"                               = 0
-        "appRevision"                            = 0
-        "keyVaultName"                           = ""
-        "licenseFileUrlSecretName"               = "licenseFileUrl"
-        "insiderSasTokenSecretName"              = "insiderSasToken"
-        "ghTokenWorkflowSecretName"              = "ghTokenWorkflow"
-        "adminCenterApiCredentialsSecretName"    = "adminCenterApiCredentials"
+        "type"                                          = "PTE"
+        "unusedALGoSystemFiles"                         = @()
+        "projects"                                      = @()
+        "country"                                       = "us"
+        "artifact"                                      = ""
+        "companyName"                                   = ""
+        "repoVersion"                                   = "1.0"
+        "repoName"                                      = $repoName
+        "versioningStrategy"                            = 0
+        "runNumberOffset"                               = 0
+        "appBuild"                                      = 0
+        "appRevision"                                   = 0
+        "keyVaultName"                                  = ""
+        "licenseFileUrlSecretName"                      = "licenseFileUrl"
+        "ghTokenWorkflowSecretName"                     = "ghTokenWorkflow"
+        "adminCenterApiCredentialsSecretName"           = "adminCenterApiCredentials"
         "applicationInsightsConnectionStringSecretName" = "applicationInsightsConnectionString"
-        "keyVaultCertificateUrlSecretName"       = ""
-        "keyVaultCertificatePasswordSecretName"  = ""
-        "keyVaultClientIdSecretName"             = ""
-        "codeSignCertificateUrlSecretName"       = "codeSignCertificateUrl"
-        "codeSignCertificatePasswordSecretName"  = "codeSignCertificatePassword"
-        "additionalCountries"                    = @()
-        "appDependencies"                        = @()
-        "appFolders"                             = @()
-        "testDependencies"                       = @()
-        "testFolders"                            = @()
-        "bcptTestFolders"                        = @()
-        "installApps"                            = @()
-        "installTestApps"                        = @()
-        "installOnlyReferencedApps"              = $true
-        "generateDependencyArtifact"             = $false
-        "skipUpgrade"                            = $false
-        "applicationDependency"                  = "18.0.0.0"
-        "updateDependencies"                     = $false
-        "installTestRunner"                      = $false
-        "installTestFramework"                   = $false
-        "installTestLibraries"                   = $false
-        "installPerformanceToolkit"              = $false
-        "enableCodeCop"                          = $false
-        "enableUICop"                            = $false
-        "customCodeCops"                         = @()
-        "failOn"                                 = "error"
-        "treatTestFailuresAsWarnings"            = $false
-        "rulesetFile"                            = ""
-        "vsixFile"                               = ""
-        "assignPremiumPlan"                      = $false
-        "enableTaskScheduler"                    = $false
-        "doNotBuildTests"                        = $false
-        "doNotRunTests"                          = $false
-        "doNotRunBcptTests"                      = $false
-        "doNotPublishApps"                       = $false
-        "doNotSignApps"                          = $false
-        "configPackages"                         = @()
-        "appSourceCopMandatoryAffixes"           = @()
-        "obsoleteTagMinAllowedMajorMinor"        = ""
-        "memoryLimit"                            = ""
-        "templateUrl"                            = ""
-        "templateBranch"                         = ""
-        "appDependencyProbingPaths"              = @()
-        "useProjectDependencies"                 = $false
-        "runs-on"                                = "windows-latest"
-        "shell"                                  = ""
-        "githubRunner"                           = ""
-        "githubRunnerShell"                      = ""
-        "cacheImageName"                         = "my"
-        "cacheKeepDays"                          = 3
-        "alwaysBuildAllProjects"                 = $false
-        "microsoftTelemetryConnectionString"     = $microsoftTelemetryConnectionString
-        "partnerTelemetryConnectionString"       = ""
-        "sendExtendedTelemetryToMicrosoft"       = $false
-        "environments"                           = @()
-        "buildModes"                             = @()
-        "useCompilerFolder"                      = $false
+        "keyVaultCertificateUrlSecretName"              = ""
+        "keyVaultCertificatePasswordSecretName"         = ""
+        "keyVaultClientIdSecretName"                    = ""
+        "keyVaultCodesignCertificateName"               = ""
+        "codeSignCertificateUrlSecretName"              = "codeSignCertificateUrl"
+        "codeSignCertificatePasswordSecretName"         = "codeSignCertificatePassword"
+        "additionalCountries"                           = @()
+        "appDependencies"                               = @()
+        "projectName"                                   = ""
+        "appFolders"                                    = @()
+        "testDependencies"                              = @()
+        "testFolders"                                   = @()
+        "bcptTestFolders"                               = @()
+        "installApps"                                   = @()
+        "installTestApps"                               = @()
+        "installOnlyReferencedApps"                     = $true
+        "generateDependencyArtifact"                    = $false
+        "skipUpgrade"                                   = $false
+        "applicationDependency"                         = "18.0.0.0"
+        "updateDependencies"                            = $false
+        "installTestRunner"                             = $false
+        "installTestFramework"                          = $false
+        "installTestLibraries"                          = $false
+        "installPerformanceToolkit"                     = $false
+        "enableCodeCop"                                 = $false
+        "enableUICop"                                   = $false
+        "customCodeCops"                                = @()
+        "failOn"                                        = "error"
+        "treatTestFailuresAsWarnings"                   = $false
+        "rulesetFile"                                   = ""
+        "enableExternalRulesets"                        = $false
+        "vsixFile"                                      = ""
+        "assignPremiumPlan"                             = $false
+        "enableTaskScheduler"                           = $false
+        "doNotBuildTests"                               = $false
+        "doNotRunTests"                                 = $false
+        "doNotRunBcptTests"                             = $false
+        "doNotPublishApps"                              = $false
+        "doNotSignApps"                                 = $false
+        "configPackages"                                = @()
+        "appSourceCopMandatoryAffixes"                  = @()
+        "obsoleteTagMinAllowedMajorMinor"               = ""
+        "memoryLimit"                                   = ""
+        "templateUrl"                                   = ""
+        "templateBranch"                                = ""
+        "appDependencyProbingPaths"                     = @()
+        "useProjectDependencies"                        = $false
+        "runs-on"                                       = "windows-latest"
+        "shell"                                         = ""
+        "githubRunner"                                  = ""
+        "githubRunnerShell"                             = ""
+        "cacheImageName"                                = "my"
+        "cacheKeepDays"                                 = 3
+        "alwaysBuildAllProjects"                        = $false
+        "microsoftTelemetryConnectionString"            = $microsoftTelemetryConnectionString
+        "partnerTelemetryConnectionString"              = ""
+        "sendExtendedTelemetryToMicrosoft"              = $false
+        "environments"                                  = @()
+        "buildModes"                                    = @()
+        "useCompilerFolder"                             = $false
+        "PullRequestTrigger"                            = "pull_request_target"
+        "fullBuildPatterns"                             = @()
+        "excludeEnvironments"                           = @()
     }
 
     # Read settings from files and merge them into the settings object
@@ -558,38 +658,38 @@ function ReadSettings {
             $settingsObjects += @($projectWorkflowSettingsObject, $userSettingsObject)
         }
     }
-    $settingsObjects | Where-Object { $_ } | ForEach-Object {
-        $settingsJson = $_
-        MergeCustomObjectIntoOrderedDictionary -dst $settings -src $settingsJson
-        if ("$settingsJson" -ne "" -and $settingsJson.PSObject.Properties.Name -eq "ConditionalSettings") {
-            $settingsJson.ConditionalSettings | ForEach-Object {
-                $conditionalSetting = $_
-                if ("$conditionalSetting" -ne "") {
-                    $conditionMet = $true
-                    $conditions = @()
-                    if ($conditionalSetting.PSObject.Properties.Name -eq "branches") {
-                        $conditionMet = $conditionMet -and ($conditionalSetting.branches | Where-Object { $branchName -like $_ })
-                        $conditions += @("branchName: $branchName")
-                    }
-                    if ($conditionalSetting.PSObject.Properties.Name -eq "repositories") {
-                        $conditionMet = $conditionMet -and ($conditionalSetting.repositories | Where-Object { $repoName -like $_ })
-                        $conditions += @("repoName: $repoName")
-                    }
-                    if ($project -and $conditionalSetting.PSObject.Properties.Name -eq "projects") {
-                        $conditionMet = $conditionMet -and ($conditionalSetting.projects | Where-Object { $project -like $_ })
-                        $conditions += @("project: $project")
-                    }
-                    if ($workflowName -and $conditionalSetting.PSObject.Properties.Name -eq "workflows") {
-                        $conditionMet = $conditionMet -and ($conditionalSetting.workflows | Where-Object { $workflowName -like $_ })
-                        $conditions += @("workflowName: $workflowName")
-                    }
-                    if ($userName -and $conditionalSetting.PSObject.Properties.Name -eq "users") {
-                        $conditionMet = $conditionMet -and ($conditionalSetting.users | Where-Object { $userName -like $_ })
-                        $conditions += @("userName: $userName")
-                    }
-                    if ($conditionMet) {
-                        Write-Host "Applying conditional settings for $($conditions -join ", ")"
-                        MergeCustomObjectIntoOrderedDictionary -dst $settings -src $conditionalSetting.settings
+    foreach($settingsJson in $settingsObjects) {
+        if ($settingsJson) {
+            MergeCustomObjectIntoOrderedDictionary -dst $settings -src $settingsJson
+            if ($settingsJson.PSObject.Properties.Name -eq "ConditionalSettings") {
+                foreach($conditionalSetting in $settingsJson.ConditionalSettings) {
+                    if ("$conditionalSetting" -ne "") {
+                        $conditionMet = $true
+                        $conditions = @()
+                        if ($conditionalSetting.PSObject.Properties.Name -eq "branches") {
+                            $conditionMet = $conditionMet -and ($conditionalSetting.branches | Where-Object { $branchName -like $_ })
+                            $conditions += @("branchName: $branchName")
+                        }
+                        if ($conditionalSetting.PSObject.Properties.Name -eq "repositories") {
+                            $conditionMet = $conditionMet -and ($conditionalSetting.repositories | Where-Object { $repoName -like $_ })
+                            $conditions += @("repoName: $repoName")
+                        }
+                        if ($project -and $conditionalSetting.PSObject.Properties.Name -eq "projects") {
+                            $conditionMet = $conditionMet -and ($conditionalSetting.projects | Where-Object { $project -like $_ })
+                            $conditions += @("project: $project")
+                        }
+                        if ($workflowName -and $conditionalSetting.PSObject.Properties.Name -eq "workflows") {
+                            $conditionMet = $conditionMet -and ($conditionalSetting.workflows | Where-Object { $workflowName -like $_ })
+                            $conditions += @("workflowName: $workflowName")
+                        }
+                        if ($userName -and $conditionalSetting.PSObject.Properties.Name -eq "users") {
+                            $conditionMet = $conditionMet -and ($conditionalSetting.users | Where-Object { $userName -like $_ })
+                            $conditions += @("userName: $userName")
+                        }
+                        if ($conditionMet) {
+                            Write-Host "Applying conditional settings for $($conditions -join ", ")"
+                            MergeCustomObjectIntoOrderedDictionary -dst $settings -src $conditionalSetting.settings
+                        }
                     }
                 }
             }
@@ -626,6 +726,16 @@ function ReadSettings {
     if ($settings.githubRunnerShell -eq "") {
         $settings.githubRunnerShell = $settings.shell
     }
+    # Check that gitHubRunnerShell and Shell is valid
+    if ($settings.githubRunnerShell -ne "powershell" -and $settings.githubRunnerShell -ne "pwsh") {
+        throw "Invalid value for setting: gitHubRunnerShell: $($settings.githubRunnerShell)"
+    }
+    if ($settings.shell -ne "powershell" -and $settings.shell -ne "pwsh") {
+        throw "Invalid value for setting: shell: $($settings.githubRunnerShell)"
+    }
+    if($settings.projectName -eq '') {
+        $settings.projectName = $project # Default to project path as project name
+    }
     $settings
 }
 
@@ -636,36 +746,117 @@ function ExcludeUnneededApps {
         [hashtable] $appIdFolders
     )
 
-    $folders | ForEach-Object {
-        $folder = $_
+    foreach($folder in $folders) {
         if ($includeOnlyAppIds.Contains(($appIdFolders.GetEnumerator() | Where-Object { $_.Value -eq $folder }).Key)) {
             $folder
         }
     }
 }
 
+function ResolveProjectFolders {
+    Param(
+        [string] $project,
+        [string] $baseFolder,
+        [ref] $projectSettings
+    )
+    $projectPath = Join-Path $baseFolder $project -Resolve
+
+    Push-Location $projectPath
+
+    try {
+        $appFolders = $projectSettings.Value.appFolders
+        $testFolders = $projectSettings.Value.testFolders
+        $bcptTestFolders = $projectSettings.Value.bcptTestFolders
+
+        # If no app folders are specified in AL-Go settings, check for AL apps in the project folder
+        if (!$appFolders -and !$testFolders -and !$bcptTestFolders) {
+            Get-ChildItem -Path $projectPath -Recurse | Where-Object { $_.PSIsContainer -and (Test-Path -Path (Join-Path $_.FullName "app.json")) } | ForEach-Object {
+                $aLProjectFolder = $_
+                $appJson = Get-Content (Join-Path $aLProjectFolder.FullName "app.json") -Encoding UTF8 | ConvertFrom-Json
+
+                $isTestApp = $false
+                $isBcptTestApp = $false
+
+                # if an AL app has a dependency to a test app, it is a test app
+                # if an AL app has a dependency to an app from the performance toolkit apps, it is a bcpt test app
+                if ($appJson.PSObject.Properties.Name -eq "dependencies") {
+                    foreach($dependency in $appJson.dependencies) {
+                        if ($dependency.PSObject.Properties.Name -eq "AppId") {
+                            $id = $dependency.AppId
+                        }
+                        else {
+                            $id = $dependency.Id
+                        }
+
+                        # Check if the app is a test app or a bcpt app
+                        if ($performanceToolkitApps.Contains($id)) {
+                            $isBcptTestApp = $true
+                        }
+                        elseif ($testRunnerApps.Contains($id)) {
+                            $isTestApp = $true
+                        }
+                    }
+                }
+
+                # Folders are relative to the project folder
+                $appFolder = Resolve-Path -Path $aLProjectFolder.FullName -Relative
+                switch ($true) {
+                    $isTestApp { $testFolders += @($appFolder) }
+                    $isBcptTestApp { $bcptTestFolders += @($appFolder) }
+                    Default { $appFolders += @($appFolder) }
+                }
+            }
+        }
+
+        # Filter out app folders that doesn't contain an app.json file
+        function FilterFolders($projectPath, $folders) {
+            if (!$folders) {
+                return @()
+            }
+
+            $resolvedPaths = @()
+
+            foreach ($folder in $folders) {
+                $aLProjectFolder = Join-Path $projectPath $folder
+                $resolvedALProjectsPaths = Resolve-Path $aLProjectFolder -Relative -ErrorAction Ignore | Where-Object { Test-Path (Join-Path $_ 'app.json') }
+
+                if ($resolvedALProjectsPaths) {
+                    $resolvedPaths += @($resolvedALProjectsPaths)
+                }
+                else {
+                    OutputWarning "The folder '$folder' for project '$project' cannot be resolved or does not contain an app.json file. Skipping."
+                }
+            }
+
+            return $resolvedPaths
+        }
+
+        $projectSettings.Value.appFolders = @(FilterFolders $projectPath $appFolders)
+        $projectSettings.Value.testFolders = @(FilterFolders $projectPath $testFolders)
+        $projectSettings.Value.bcptTestFolders = @(FilterFolders $projectPath $bcptTestFolders)
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 function AnalyzeRepo {
     Param(
         [hashTable] $settings,
-        $token,
         [string] $baseFolder = $ENV:GITHUB_WORKSPACE,
         [string] $project = '.',
-        [string] $insiderSasToken,
         [switch] $doNotCheckArtifactSetting,
         [switch] $doNotIssueWarnings,
-        [string[]] $includeOnlyAppIds,
-        [string] $server_url = $ENV:GITHUB_SERVER_URL,
-        [string] $repository = $ENV:GITHUB_REPOSITORY
+        [string[]] $includeOnlyAppIds
     )
 
     $settings = $settings | Copy-HashTable
-    
+
     if (!$runningLocal) {
         Write-Host "::group::Analyzing repository"
     }
 
     $projectPath = Join-Path $baseFolder $project -Resolve
-    Set-Location $projectPath
 
     # Check applicationDependency
     [Version]$settings.applicationDependency | Out-null
@@ -697,39 +888,7 @@ function AnalyzeRepo {
         throw "The type, specified in $RepoSettingsFile, must be either 'PTE' or 'AppSource App'. It is '$($settings.type)'."
     }
 
-    if (-not (@($settings.appFolders)+@($settings.testFolders)+@($settings.bcptTestFolders))) {
-        Get-ChildItem -Path $projectPath | Where-Object { $_.PSIsContainer -and (Test-Path -Path (Join-Path $_.FullName "app.json")) } | ForEach-Object {
-            $folder = $_
-            $appJson = Get-Content (Join-Path $folder.FullName "app.json") -Encoding UTF8 | ConvertFrom-Json
-            $isTestApp = $false
-            $isBcptTestApp = $false
-            if ($appJson.PSObject.Properties.Name -eq "dependencies") {
-                $appJson.dependencies | ForEach-Object {
-                    if ($_.PSObject.Properties.Name -eq "AppId") {
-                        $id = $_.AppId
-                    }
-                    else {
-                        $id = $_.Id
-                    }
-                    if ($performanceToolkitApps.Contains($id)) { 
-                        $isBcptTestApp = $true
-                    }
-                    elseif ($testRunnerApps.Contains($id)) { 
-                        $isTestApp = $true
-                    }
-                }
-            }
-            if ($isBcptTestApp) {
-                $settings.bcptTestFolders += @($_.Name)
-            }
-            elseif ($isTestApp) {
-                $settings.testFolders += @($_.Name)
-            }
-            else {
-                $settings.appFolders += @($_.Name)
-            }
-        }
-    }
+    ResolveProjectFolders -baseFolder $baseFolder -project $project -projectSettings ([ref] $settings)
 
     Write-Host "Checking appFolders, testFolders and bcptTestFolders"
     $dependencies = [ordered]@{}
@@ -753,6 +912,7 @@ function AnalyzeRepo {
         else {
             throw "Internal error"
         }
+
         $folders | ForEach-Object {
             $folderName = $_
             $folder = Join-Path $projectPath $folderName
@@ -773,58 +933,43 @@ function AnalyzeRepo {
                 $enumerate = $false
             }
             if ($enumerate) {
-                $expandFolders = @(Get-Item $appJsonFile -ErrorAction SilentlyContinue | ForEach-Object { Resolve-Path -Relative $_.Directory })
-                if ($appFolder) {
-                    $settings.appFolders = @($settings.appFolders | Where-Object { $_ -ne $folderName }) + $expandFolders
+                if ($dependencies.Contains($folderName)) {
+                    throw "$descr $folderName, specified in $ALGoSettingsFile, is specified more than once."
                 }
-                elseif ($testFolder) {
-                    $settings.testFolders = @($settings.testFolders | Where-Object { $_ -ne $folderName }) + $expandFolders
-                }
-                elseif ($bcptTestFolder) {
-                    $settings.bcptTestFolders = @($settings.bcptTestFolders | Where-Object { $_ -ne $folderName }) + $expandFolders
-                }
-                $expandFolders | ForEach-Object {
-                    $folderName = $_
-                    $folder = Join-Path $projectPath $folderName
-                    $appJsonFile = Join-Path $folder "app.json"
-                    if ($dependencies.Contains($folderName)) {
-                        throw "$descr $folderName, specified in $ALGoSettingsFile, is specified more than once."
+                $dependencies.Add($folderName, @())
+                try {
+                    $appJson = Get-Content $appJsonFile -Encoding UTF8 | ConvertFrom-Json
+                    if ($appIdFolders.Contains($appJson.Id)) {
+                        throw "$descr $folderName contains a duplicate AppId ($($appIdFolders."$($appJson.Id)"))"
                     }
-                    $dependencies.Add($folderName, @())
-                    try {
-                        $appJson = Get-Content $appJsonFile -Encoding UTF8 | ConvertFrom-Json
-                        if ($appIdFolders.Contains($appJson.Id)) {
-                            throw "$descr $folderName contains a duplicate AppId ($($appIdFolders."$($appJson.Id)"))"
-                        }
-                        $appIdFolders.Add($appJson.Id, $folderName)
-                        if ($appJson.PSObject.Properties.Name -eq 'Dependencies') {
-                            $appJson.dependencies | ForEach-Object {
-                                if ($_.PSObject.Properties.Name -eq "AppId") {
-                                    $id = $_.AppId
-                                }
-                                else {
-                                    $id = $_.Id
-                                }
-                                if ($id -eq $applicationAppId) {
-                                    if ([Version]$_.Version -gt [Version]$settings.applicationDependency) {
-                                        $settings.applicationDependency = $appDep
-                                    }
-                                }
-                                else {
-                                    $dependencies."$folderName" += @( [ordered]@{ "id" = $id; "version" = $_.version } )
+                    $appIdFolders.Add($appJson.Id, $folderName)
+                    if ($appJson.PSObject.Properties.Name -eq 'Dependencies') {
+                        $appJson.dependencies | ForEach-Object {
+                            if ($_.PSObject.Properties.Name -eq "AppId") {
+                                $id = $_.AppId
+                            }
+                            else {
+                                $id = $_.Id
+                            }
+                            if ($id -eq $applicationAppId) {
+                                if ([Version]$_.Version -gt [Version]$settings.applicationDependency) {
+                                    $settings.applicationDependency = $appDep
                                 }
                             }
-                        }
-                        if ($appJson.PSObject.Properties.Name -eq 'Application') {
-                            $appDep = $appJson.application
-                            if ([Version]$appDep -gt [Version]$settings.applicationDependency) {
-                                $settings.applicationDependency = $appDep
+                            else {
+                                $dependencies."$folderName" += @( [ordered]@{ "id" = $id; "version" = $_.version } )
                             }
                         }
                     }
-                    catch {
-                        throw "$descr $folderName, specified in $ALGoSettingsFile, contains a corrupt app.json file. Error is $($_.Exception.Message)."
+                    if ($appJson.PSObject.Properties.Name -eq 'Application') {
+                        $appDep = $appJson.application
+                        if ([Version]$appDep -gt [Version]$settings.applicationDependency) {
+                            $settings.applicationDependency = $appDep
+                        }
                     }
+                }
+                catch {
+                    throw "$descr $folderName, specified in $ALGoSettingsFile, contains a corrupt app.json file. Error is $($_.Exception.Message)."
                 }
             }
         }
@@ -849,7 +994,7 @@ function AnalyzeRepo {
     }
 
     if (!$doNotCheckArtifactSetting) {
-        $artifactUrl = Determine-ArtifactUrl -projectSettings $settings -insiderSasToken $insiderSasToken -doNotIssueWarnings:$doNotIssueWarnings
+        $artifactUrl = DetermineArtifactUrl -projectSettings $settings -doNotIssueWarnings:$doNotIssueWarnings
         $version = $artifactUrl.Split('/')[4]
         Write-Host "Downloading artifacts from $($artifactUrl.Split('?')[0])"
         $folders = Download-Artifacts -artifactUrl $artifactUrl -includePlatform -ErrorAction SilentlyContinue
@@ -909,28 +1054,50 @@ function AnalyzeRepo {
         Write-Host "::endgroup::"
     }
 
-    Write-Host "Checking project dependencies"
+    if (!$settings.doNotRunBcptTests -and -not $settings.bcptTestFolders) {
+        Write-Host "No performance test apps found in bcptTestFolders in $ALGoSettingsFile"
+        $settings.doNotRunBcptTests = $true
+    }
+    if (!$settings.doNotRunTests -and -not $settings.testFolders) {
+        if (!$doNotIssueWarnings) { OutputWarning -message "No test apps found in testFolders in $ALGoSettingsFile" }
+        $settings.doNotRunTests = $true
+    }
+    if (-not $settings.appFolders) {
+        if (!$doNotIssueWarnings) { OutputWarning -message "No apps found in appFolders in $ALGoSettingsFile" }
+    }
+
+    $settings
+}
+
+function CheckAppDependencyProbingPaths {
+    Param(
+        [hashTable] $settings,
+        $token,
+        [string] $baseFolder = $ENV:GITHUB_WORKSPACE,
+        [string] $project = '.',
+        [string[]] $includeOnlyAppIds
+    )
 
     Write-Host "Checking appDependencyProbingPaths"
+    $settings = $settings | Copy-HashTable
     if ($settings.appDependencyProbingPaths) {
         $settings.appDependencyProbingPaths = @($settings.appDependencyProbingPaths | ForEach-Object {
-            if ($_.GetType().Name -eq "PSCustomObject") {
-                $_
-            } 
-            else { 
-                New-Object -Type PSObject -Property $_
-            } 
-        })
-        $settings.appDependencyProbingPaths | ForEach-Object {
-            $dependency = $_
+                if ($_.GetType().Name -eq "PSCustomObject") {
+                    $_
+                }
+                else {
+                    New-Object -Type PSObject -Property $_
+                }
+            })
+        foreach($dependency in $settings.appDependencyProbingPaths) {
             if (-not ($dependency.PsObject.Properties.name -eq "repo")) {
-                throw "AppDependencyProbingPaths needs to contain a repo property, pointing to the repository on which you have a dependency"
+                throw "The Setting AppDependencyProbingPaths needs to contain a repo property, pointing to the repository on which your project have a dependency"
             }
             if ($dependency.Repo -eq ".") {
-                $dependency.Repo = "$server_url/$repository"
+                $dependency.Repo = "$ENV:GITHUB_SERVER_URL/$ENV:GITHUB_REPOSITORY"
             }
             elseif ($dependency.Repo -notlike "https://*") {
-                $dependency.Repo = "$server_url/$($dependency.Repo)"
+                $dependency.Repo = "$ENV:GITHUB_SERVER_URL/$($dependency.Repo)"
             }
             if (-not ($dependency.PsObject.Properties.name -eq "Version")) {
                 $dependency | Add-Member -name "Version" -MemberType NoteProperty -Value "latest"
@@ -948,12 +1115,21 @@ function AnalyzeRepo {
                 $dependency | Add-Member -name "branch" -MemberType NoteProperty -Value "main"
             }
             Write-Host "Dependency to projects '$($dependency.projects)' in $($dependency.Repo)@$($dependency.branch), version $($dependency.version), release status $($dependency.release_status)"
-            if (-not ($dependency.PsObject.Properties.name -eq "AuthTokenSecret")) {
+            if ($dependency.PsObject.Properties.name -eq "AuthTokenSecret") {
+                Write-Host "Using secret $($dependency.AuthTokenSecret) for access to repository"
+                if ("$env:Secrets" -eq "") {
+                    throw "Internal error. Secrets are not available!"
+                }
+                $secrets = $env:Secrets | ConvertFrom-Json
+                # AuthTokenSecret is specified, use the value of that secret
+                $dependency.AuthTokenSecret = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets."$($dependency.AuthTokenSecret)"))
+            }
+            else {
                 if ($token) {
-                    Write-Host "Using token as AuthTokenSecret"
+                    Write-Host "Using GITHUB_TOKEN for access to repository"
                 }
                 else {
-                    Write-Host "No token available, will attempt to invoke gh auth token to get access to repository"
+                    Write-Host "No token available, will attempt to invoke gh auth token for access to repository"
                 }
                 $dependency | Add-Member -name "AuthTokenSecret" -MemberType NoteProperty -Value $token
             }
@@ -968,36 +1144,42 @@ function AnalyzeRepo {
             }
 
             if ($dependency.release_status -eq "include") {
-                if ($dependency.Repo -ne "$server_url/$repository") {
+                if ($dependency.Repo -ne "$ENV:GITHUB_SERVER_URL/$ENV:GITHUB_REPOSITORY") {
                     OutputWarning "Dependencies with release_status 'include' must be to other projects in the same repository."
                 }
                 else {
-                    $dependency.projects.Split(',') | ForEach-Object {
-                        if ($_ -eq '*') {
+                    foreach($depProject in $dependency.projects.Split(',')) {
+                        if ($depProject -eq '*') {
                             OutputWarning "Dependencies to the same repository cannot specify all projects (*)"
                         }
                         else {
-                            $depProject = $_
                             Write-Host "Identified dependency to project $depProject in the same repository"
 
                             $dependencyIds = @( @($settings.appDependencies + $settings.testDependencies) | ForEach-Object { $_.id })
+                            $thisIncludeOnlyAppIds = @($dependencyIds + $includeOnlyAppIds + $dependency.alwaysIncludeApps)
                             $depSettings = ReadSettings -baseFolder $baseFolder -project $depProject -workflowName "CI/CD"
-                            $depSettings = AnalyzeRepo -settings $depSettings -token $token -baseFolder $baseFolder -project $depProject -includeOnlyAppIds @($dependencyIds + $includeOnlyAppIds + $dependency.alwaysIncludeApps) -doNotIssueWarnings -doNotCheckArtifactSetting -server_url $server_url -repository $repository
+                            $depSettings = AnalyzeRepo -settings $depSettings -baseFolder $baseFolder -project $depProject -includeOnlyAppIds $thisIncludeOnlyAppIds -doNotCheckArtifactSetting -doNotIssueWarnings
+                            $depSettings = CheckAppDependencyProbingPaths -settings $depSettings -token $token -baseFolder $baseFolder -project $depProject -includeOnlyAppIds $thisIncludeOnlyAppIds
 
-                            Set-Location $projectPath
-                            "appFolders","testFolders" | ForEach-Object {
-                                $propertyName = $_
-                                Write-Host "Adding folders from $depProject to $_"
-                                $found = $true
-                                $depSettings."$propertyName" | ForEach-Object {
-                                    $folder = (Resolve-Path -Path (Join-Path $baseFolder "$depProject/$_") -Relative).ToLowerInvariant()
-                                    if (!$settings."$propertyName".Contains($folder)) {
-                                        $settings."$propertyName" += @($folder)
-                                        $found = $true
-                                        Write-Host "- $folder"
+                            $projectPath = Join-Path $baseFolder $project -Resolve
+                            Push-Location $projectPath
+                            try {
+                                foreach($propertyName in "appFolders", "testFolders", "bcptTestFolders") {
+                                    Write-Host "Adding folders from $depProject to $propertyName in $project"
+                                    $found = $false
+                                    foreach($_ in $depSettings."$propertyName") {
+                                        $folder = Resolve-Path -Path (Join-Path $baseFolder "$depProject/$_") -Relative
+                                        if (!$settings."$propertyName".Contains($folder)) {
+                                            $settings."$propertyName" += @($folder)
+                                            $found = $true
+                                            Write-Host "- $folder"
+                                        }
                                     }
+                                    if (!$found) { Write-Host "- No folders added" }
                                 }
-                                if (!$found) { Write-Host "- No folders added" }
+                            }
+                            finally {
+                                Pop-Location
                             }
                         }
                     }
@@ -1005,50 +1187,34 @@ function AnalyzeRepo {
             }
         }
     }
-
-    if (!$settings.doNotRunBcptTests -and -not $settings.bcptTestFolders) {
-        if (!$doNotIssueWarnings) { OutputWarning -message "No performance test apps found in bcptTestFolders in $ALGoSettingsFile" }
-        $settings.doNotRunBcptTests = $true
-    }
-    if (!$settings.doNotRunTests -and -not $settings.testFolders) {
-        if (!$doNotIssueWarnings) { OutputWarning -message "No test apps found in testFolders in $ALGoSettingsFile" }
-        $settings.doNotRunTests = $true
-    }
-    if (-not $settings.appFolders) {
-        if (!$doNotIssueWarnings) { OutputWarning -message "No apps found in appFolders in $ALGoSettingsFile" }
-    }
-
     $settings
 }
 
-function Get-ProjectFolders {
+function GetProjectFolders {
     Param(
         [string] $baseFolder,
         [string] $project,
         [switch] $includeALGoFolder,
-        [string[]] $includeOnlyAppIds,
-        [string] $server_url = $ENV:GITHUB_SERVER_URL,
-        [string] $repository = $ENV:GITHUB_REPOSITORY,
-        $token
+        [string[]] $includeOnlyAppIds
     )
 
     Write-Host "Analyzing project $project"
     if ($includeOnlyAppIds) {
         $systemAppId, $baseAppId, $applicationAppId | ForEach-Object {
-            if (!$includeOnlyAppIds.Contains($_)) { $includeOnlyAppIds += @($_)}
+            if (!$includeOnlyAppIds.Contains($_)) { $includeOnlyAppIds += @($_) }
         }
     }
 
     $projectFolders = @()
     $settings = ReadSettings -baseFolder $baseFolder -project $project -workflowName "CI/CD"
-    $settings = AnalyzeRepo -settings $settings -token $token -baseFolder $baseFolder -project $project -includeOnlyAppIds $includeOnlyAppIds -doNotIssueWarnings -doNotCheckArtifactSetting -server_url $server_url -repository $repository
+    $settings = AnalyzeRepo -settings $settings -baseFolder $baseFolder -project $project -includeOnlyAppIds $includeOnlyAppIds -doNotIssueWarnings -doNotCheckArtifactSetting
     $AlGoFolderArr = @()
     if ($includeALGoFolder) { $AlGoFolderArr = @($ALGoFolderName) }
     Set-Location $baseFolder
     @($settings.appFolders + $settings.testFolders + $settings.bcptTestFolders + $AlGoFolderArr) | ForEach-Object {
         $fullPath = Join-Path $baseFolder "$project/$_" -Resolve
         $relativePath = Resolve-Path -Path $fullPath -Relative
-        $folder = $relativePath.Substring(2).Replace('\','/').ToLowerInvariant()
+        $folder = $relativePath.Substring(2).Replace('\', '/').ToLowerInvariant()
         if ($includeOnlyAppIds) {
             $appJsonFile = Join-Path $fullPath 'app.json'
             if (Test-Path $appJsonFile) {
@@ -1077,7 +1243,7 @@ function installModules {
             Install-Module $_ -Force | Out-Null
         }
     }
-    $modules | ForEach-Object { 
+    $modules | ForEach-Object {
         Write-Host "Importing module $_"
         Import-Module $_ -DisableNameChecking -WarningAction SilentlyContinue | Out-Null
     }
@@ -1132,7 +1298,12 @@ function CommitFromNewFolder {
     invoke-git commit --allow-empty -m "'$commitMessage'"
     if ($branch) {
         invoke-git push -u $serverUrl $branch
-        invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY --base $ENV:GITHUB_REF_NAME
+        try {
+            invoke-gh pr create --fill --head $branch --repo $env:GITHUB_REPOSITORY --base $ENV:GITHUB_REF_NAME
+        }
+        catch {
+            OutputError("GitHub actions are not allowed to create Pull Requests (see GitHub Organization or Repository Actions Settings). You can create the PR manually by navigating to $($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/tree/$branch")
+        }
     }
     else {
         invoke-git push $serverUrl
@@ -1141,21 +1312,21 @@ function CommitFromNewFolder {
 
 function Select-Value {
     Param(
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [string] $title,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [string] $description,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         $options,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [string] $default = "",
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string] $question
     )
 
     if ($title) {
         Write-Host -ForegroundColor Yellow $title
-        Write-Host -ForegroundColor Yellow ("-"*$title.Length)
+        Write-Host -ForegroundColor Yellow ("-" * $title.Length)
     }
     if ($description) {
         Write-Host $description
@@ -1164,19 +1335,19 @@ function Select-Value {
     $offset = 0
     $keys = @()
     $values = @()
-
-    $options.GetEnumerator() | ForEach-Object {
+    $defaultAnswer = 0
+    foreach($option in $options.GetEnumerator()) {
         Write-Host -ForegroundColor Yellow "$([char]($offset+97)) " -NoNewline
-        $keys += @($_.Key)
-        $values += @($_.Value)
-        if ($_.Key -eq $default) {
-            Write-Host -ForegroundColor Yellow $_.Value
+        $keys += @($option.Key)
+        $values += @($option.Value)
+        if ($option.Key -eq $default) {
+            Write-Host -ForegroundColor Yellow $option.Value
             $defaultAnswer = $offset
         }
         else {
-            Write-Host $_.Value
+            Write-Host $option.Value
         }
-        $offset++     
+        $offset++
     }
     Write-Host
     $answer = -1
@@ -1195,11 +1366,11 @@ function Select-Value {
             }
         }
         else {
-            if (($selection.Length -ne 1) -or (([int][char]($selection)) -lt 97 -or ([int][char]($selection)) -ge (97+$offset))) {
+            if (($selection.Length -ne 1) -or (([int][char]($selection)) -lt 97 -or ([int][char]($selection)) -ge (97 + $offset))) {
                 Write-Host -ForegroundColor Red "Illegal answer. " -NoNewline
             }
             else {
-                $answer = ([int][char]($selection))-97
+                $answer = ([int][char]($selection)) - 97
             }
         }
         if ($answer -eq -1) {
@@ -1219,24 +1390,23 @@ function Select-Value {
 
 function Enter-Value {
     Param(
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [string] $title,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [string] $description,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         $options,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [string] $default = "",
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string] $question,
         [switch] $doNotConvertToLower,
-        [switch] $previousStep,
         [char[]] $trimCharacters = @()
     )
 
     if ($title) {
         Write-Host -ForegroundColor Yellow $title
-        Write-Host -ForegroundColor Yellow ("-"*$title.Length)
+        Write-Host -ForegroundColor Yellow ("-" * $title.Length)
     }
     if ($description) {
         Write-Host $description
@@ -1301,7 +1471,7 @@ function OptionallyConvertFromBase64 {
             ""
         }
         else {
-            [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($value.Substring(2, $value.Length-4)))
+            [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($value.Substring(2, $value.Length - 4)))
         }
     }
 }
@@ -1312,35 +1482,34 @@ function GetContainerName([string] $project) {
 
 function CreateDevEnv {
     Param(
-        [Parameter(Mandatory=$true)]
-        [ValidateSet('local','cloud')]
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('local', 'cloud')]
         [string] $kind,
-        [ValidateSet('local','GitHubActions')]
+        [ValidateSet('local', 'GitHubActions')]
         [string] $caller = 'local',
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string] $baseFolder,
         [string] $project,
         [string] $userName = $env:Username,
-        [string] $bcContainerHelperPath = "",
 
-        [Parameter(ParameterSetName='cloud')]
+        [Parameter(ParameterSetName = 'cloud')]
         [Hashtable] $bcAuthContext = $null,
-        [Parameter(ParameterSetName='cloud')]
+        [Parameter(ParameterSetName = 'cloud')]
         [Hashtable] $adminCenterApiCredentials = @{},
-        [Parameter(Mandatory=$true, ParameterSetName='cloud')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'cloud')]
         [string] $environmentName,
-        [Parameter(ParameterSetName='cloud')]
+        [Parameter(ParameterSetName = 'cloud')]
         [switch] $reuseExistingEnvironment,
 
-        [Parameter(Mandatory=$true, ParameterSetName='local')]
-        [ValidateSet('Windows','UserPassword')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'local')]
+        [ValidateSet('Windows', 'UserPassword')]
         [string] $auth,
-        [Parameter(Mandatory=$true, ParameterSetName='local')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'local')]
         [pscredential] $credential,
-        [Parameter(ParameterSetName='local')]
+        [Parameter(ParameterSetName = 'local')]
         [string] $containerName = "",
-        [string] $insiderSasToken = "",
-        [string] $licenseFileUrl = ""
+        [string] $licenseFileUrl = "",
+        [switch] $accept_insiderEula
     )
 
     if ($PSCmdlet.ParameterSetName -ne $kind) {
@@ -1350,11 +1519,16 @@ function CreateDevEnv {
     $projectFolder = Join-Path $baseFolder $project -Resolve
     $dependenciesFolder = Join-Path $projectFolder ".dependencies"
     $runAlPipelineParams = @{}
-    $loadBcContainerHelper = ($bcContainerHelperPath -eq "")
-    if ($loadBcContainerHelper) {
-        $BcContainerHelperPath = DownloadAndImportBcContainerHelper -baseFolder $baseFolder
-    }
+    DownloadAndImportBcContainerHelper -baseFolder $baseFolder
+    $removeEnvSecrets = $false
     try {
+        if ($env:Secrets) {
+            $secrets = $env:Secrets | ConvertFrom-Json | ConvertTo-HashTable
+        }
+        else {
+            $secrets = @{}
+            $removeEnvSecrets = $true
+        }
         if ($caller -eq "local") {
             $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
             if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -1364,13 +1538,13 @@ function CreateDevEnv {
 
         $workflowName = "$($kind)DevEnv"
         $params = @{
-            "baseFolder" = $baseFolder
-            "project" = $project
+            "baseFolder"   = $baseFolder
+            "project"      = $project
             "workflowName" = $workflowName
         }
         if ($caller -eq "local") { $params += @{ "userName" = $userName } }
         $settings = ReadSettings @params
-    
+
         if ($caller -eq "GitHubActions") {
             if ($kind -ne "cloud") {
                 OutputError -message "Unexpected. kind=$kind, caller=$caller"
@@ -1386,17 +1560,21 @@ function CreateDevEnv {
                 $settings.appDependencyProbingPaths | ForEach-Object {
                     if ($_.Contains("AuthTokenSecret")) {
                         $secretName = $_.authTokenSecret
-                        $_.Remove('authTokenSecret')
+                        if (!$secrets.ContainsKey($secretName)) {
+                            $secrets."$secretName" = ''
+                        }
                         if ($settings.keyVaultName) {
                             $secret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $secretName
-                            if ($secret) { $_.authTokenSecret = $secret.SecretValue | Get-PlainText }
+                            if ($secret) {
+                                $secrets."$secretName" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(($secret.SecretValue | Get-PlainText)))
+                            }
                         }
                         else {
                             Write-Host "Not using Azure KeyVault, attempting to retrieve an auth token using gh auth token"
                             $retry = $true
                             while ($retry) {
                                 try {
-                                    $_.authTokenSecret = invoke-gh -silent -returnValue auth token
+                                    $secrets."$secretName" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((invoke-gh -silent -returnValue auth token)))
                                     $retry = $false
                                 }
                                 catch {
@@ -1406,8 +1584,9 @@ function CreateDevEnv {
                                 }
                             }
                         }
-                    } 
+                    }
                 }
+                $env:Secrets = $secrets | ConvertTo-Json
             }
 
             if (($settings.keyVaultName) -and -not ($bcAuthContext)) {
@@ -1418,20 +1597,17 @@ function CreateDevEnv {
                     $LicenseFileSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.licenseFileUrlSecretName
                     if ($LicenseFileSecret) { $licenseFileUrl = $LicenseFileSecret.SecretValue | Get-PlainText }
 
-                    $insiderSasTokenSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.insiderSasTokenSecretName
-                    if ($insiderSasTokenSecret) { $insiderSasToken = $insiderSasTokenSecret.SecretValue | Get-PlainText }
-
                     # do not add codesign cert.
 
                     if ($settings.applicationInsightsConnectionStringSecretName) {
                         $applicationInsightsConnectionStringSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.applicationInsightsConnectionStringSecretName
                         if ($applicationInsightsConnectionStringSecret) {
-                            $runAlPipelineParams += @{ 
+                            $runAlPipelineParams += @{
                                 "applicationInsightsConnectionString" = $applicationInsightsConnectionStringSecret.SecretValue | Get-PlainText
                             }
                         }
                     }
-                    
+
                     if ($settings.keyVaultCertificateUrlSecretName) {
                         $KeyVaultCertificateUrlSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.keyVaultCertificateUrlSecretName
                         if ($KeyVaultCertificateUrlSecret) {
@@ -1441,10 +1617,10 @@ function CreateDevEnv {
                                 OutputError -message "When specifying a KeyVaultCertificateUrl secret in settings, you also need to provide a KeyVaultCertificatePassword secret and a KeyVaultClientId secret"
                                 exit
                             }
-                            $runAlPipelineParams += @{ 
-                                "KeyVaultCertPfxFile" = $KeyVaultCertificateUrlSecret.SecretValue | Get-PlainText
+                            $runAlPipelineParams += @{
+                                "KeyVaultCertPfxFile"     = $KeyVaultCertificateUrlSecret.SecretValue | Get-PlainText
                                 "keyVaultCertPfxPassword" = $keyVaultCertificatePasswordSecret.SecretValue
-                                "keyVaultClientId" = $keyVaultClientIdSecret.SecretValue | Get-PlainText
+                                "keyVaultClientId"        = $keyVaultClientIdSecret.SecretValue | Get-PlainText
                             }
                         }
                     }
@@ -1452,104 +1628,103 @@ function CreateDevEnv {
                 elseif ($kind -eq "cloud") {
                     $adminCenterApiCredentialsSecret = Get-AzKeyVaultSecret -VaultName $settings.keyVaultName -Name $settings.adminCenterApiCredentialsSecretName
                     if ($adminCenterApiCredentialsSecret) { $adminCenterApiCredentials = $adminCenterApiCredentialsSecret.SecretValue | Get-PlainText | ConvertFrom-Json | ConvertTo-HashTable }
-                    $legalParameters = @("RefreshToken","CliendId","ClientSecret","deviceCode","tenantId")
+                    $legalParameters = @("RefreshToken", "CliendId", "ClientSecret", "deviceCode", "tenantId")
                     $adminCenterApiCredentials.Keys | ForEach-Object {
                         if (-not ($legalParameters -contains $_)) {
                             throw "$_ is an illegal property in adminCenterApiCredentials setting"
                         }
                     }
-                    if ($adminCenterApiCredentials.Keys -contains 'ClientSecret') {
-                        $adminCenterApiCredentials.ClientSecret = ConvertTo-SecureString -String $adminCenterApiCredentials.ClientSecret -AsPlainText -Force
-                    }
                 }
             }
         }
 
-        $params = @{
-            "settings" = $settings
-            "baseFolder" = $projectFolder
-        }
-        if ($kind -eq "local") {
-            $params += @{
-                "insiderSasToken" = $insiderSasToken
-            }
-        }
-        elseif ($kind -eq "cloud") {
+        $params = @{}
+        if ($kind -eq "cloud") {
+            $accept_insiderEula = $true
             $params += @{
                 "doNotCheckArtifactSetting" = $true
             }
         }
-        $repo = AnalyzeRepo @params
-        if ((-not $repo.appFolders) -and (-not $repo.testFolders)) {
+        $settings = AnalyzeRepo -settings $settings -baseFolder $baseFolder -project $project @params
+        $settings = CheckAppDependencyProbingPaths -settings $settings -baseFolder $baseFolder -project $project
+
+        if (!$accept_insiderEula -and ($settings.artifact -like 'https://bcinsider.blob.core.windows.net/*' -or $settings.artifact -like 'https://bcinsider.azureedge.net/*')) {
+            Read-Host 'Press ENTER to accept the Business Central insider EULA (https://go.microsoft.com/fwlink/?linkid=2245051) or break the script to cancel'
+            $accept_insiderEula = $true
+        }
+
+        if ((-not $settings.appFolders) -and (-not $settings.testFolders)) {
             Write-Host "Repository is empty"
         }
 
-        if ($kind -eq "local" -and $repo.type -eq "AppSource App" ) {
+        if ($kind -eq "local" -and $settings.type -eq "AppSource App" ) {
             if ($licenseFileUrl -eq "") {
                 OutputWarning -message "When building an AppSource App, you should create a secret called LicenseFileUrl, containing a secure URL to your license file with permission to the objects used in the app."
             }
         }
 
-        $installApps = $repo.installApps
-        $installTestApps = $repo.installTestApps
+        $installApps = $settings.installApps
+        $installTestApps = $settings.installTestApps
 
-        if ($repo.appDependencyProbingPaths) {
+        if ($settings.appDependencyProbingPaths) {
             Write-Host "Downloading dependencies ..."
 
             if (Test-Path $dependenciesFolder) {
-                Get-ChildItem -Path $dependenciesFolder -Include * -File | ForEach-Object { $_.Delete()}
+                Get-ChildItem -Path $dependenciesFolder -Include * -File | ForEach-Object { $_.Delete() }
             }
             else {
                 New-Item $dependenciesFolder -ItemType Directory | Out-Null
             }
 
-            $repo.appDependencyProbingPaths = @($repo.appDependencyProbingPaths | ForEach-Object {
-                if ($_.GetType().Name -eq "PSCustomObject") {
-                    $_
-                } 
-                else { 
-                    New-Object -Type PSObject -Property $_
-                } 
-            })
-            Get-dependencies -probingPathsJson $repo.appDependencyProbingPaths -saveToPath $dependenciesFolder -api_url 'https://api.github.com' | ForEach-Object {
+            $settings.appDependencyProbingPaths = @($settings.appDependencyProbingPaths | ForEach-Object {
+                    if ($_.GetType().Name -eq "PSCustomObject") {
+                        $_
+                    }
+                    else {
+                        New-Object -Type PSObject -Property $_
+                    }
+                })
+            GetDependencies -probingPathsJson $settings.appDependencyProbingPaths -saveToPath $dependenciesFolder -api_url 'https://api.github.com' | ForEach-Object {
                 if ($_.startswith('(')) {
-                    $installTestApps += $_    
+                    $installTestApps += $_
                 }
                 else {
-                    $installApps += $_    
+                    $installApps += $_
                 }
             }
         }
-    
-        if ($repo.versioningStrategy -eq -1) {
+
+        if ($settings.versioningStrategy -eq -1) {
             if ($kind -eq "cloud") { throw "Versioningstrategy -1 cannot be used on cloud" }
-            $artifactVersion = [Version]$repo.artifact.Split('/')[4]
+            $artifactVersion = [Version]$settings.artifact.Split('/')[4]
             $runAlPipelineParams += @{
-                "appVersion" = "$($artifactVersion.Major).$($artifactVersion.Minor)"
-                "appBuild" = $artifactVersion.Build
+                "appVersion"  = "$($artifactVersion.Major).$($artifactVersion.Minor)"
+                "appBuild"    = $artifactVersion.Build
                 "appRevision" = $artifactVersion.Revision
             }
         }
         else {
-            if (($repo.versioningStrategy -band 16) -eq 16) {
+            if (($settings.versioningStrategy -band 16) -eq 16) {
                 $runAlPipelineParams += @{
-                    "appVersion" = $repo.repoVersion
+                    "appVersion" = $settings.repoVersion
                 }
             }
             $appBuild = 0
             $appRevision = 0
-            switch ($repo.versioningStrategy -band 15) {
-                2 { # USE DATETIME
+            switch ($settings.versioningStrategy -band 15) {
+                2 {
+                    # USE DATETIME
                     $appBuild = [Int32]([DateTime]::UtcNow.ToString('yyyyMMdd'))
                     $appRevision = [Int32]([DateTime]::UtcNow.ToString('HHmmss'))
                 }
-                15 { # Use maxValue
+                15 {
+                    # Use maxValue
                     $appBuild = [Int32]::MaxValue
                     $appRevision = 0
                 }
             }
             $runAlPipelineParams += @{
-                "appBuild" = $appBuild
+                "appBuild"    = $appBuild
                 "appRevision" = $appRevision
             }
         }
@@ -1560,7 +1735,7 @@ function CreateDevEnv {
         if (Test-Path $testResultsFiles) {
             Remove-Item $testResultsFiles -Force
         }
-    
+
         Set-Location $projectFolder
         $runAlPipelineOverrides | ForEach-Object {
             $scriptName = $_
@@ -1575,14 +1750,14 @@ function CreateDevEnv {
 
         if ($kind -eq "local") {
             $runAlPipelineParams += @{
-                "artifact" = $repo.artifact.replace('{INSIDERSASTOKEN}',$insiderSasToken)
-                "auth" = $auth
+                "artifact"   = $settings.artifact.replace('{INSIDERSASTOKEN}', '')
+                "auth"       = $auth
                 "credential" = $credential
             }
             if ($containerName) {
                 $runAlPipelineParams += @{
                     "updateLaunchJson" = "Local Sandbox ($containerName)"
-                    "containerName" = $containerName
+                    "containerName"    = $containerName
                 }
             }
             else {
@@ -1595,9 +1770,9 @@ function CreateDevEnv {
             if ($runAlPipelineParams.Keys -contains 'NewBcContainer') {
                 throw "Overriding NewBcContainer is not allowed when running cloud DevEnv"
             }
-            
+
             if ($bcAuthContext) {
-                 $authContext = Renew-BcAuthContext $bcAuthContext
+                $authContext = Renew-BcAuthContext $bcAuthContext
             }
             else {
                 $authContext = New-BcAuthContext @adminCenterApiCredentials -includeDeviceLogin:($caller -eq "local")
@@ -1618,7 +1793,7 @@ function CreateDevEnv {
                 $baseApp = Get-BcPublishedApps -bcAuthContext $authContext -environment $environmentName | Where-Object { $_.Name -eq "Base Application" }
             }
             else {
-                $countryCode = $repo.country
+                $countryCode = $settings.country
                 New-BcEnvironment -bcAuthContext $authContext -environment $environmentName -countryCode $countryCode -environmentType "Sandbox" | Out-Null
                 do {
                     Start-Sleep -Seconds 10
@@ -1626,12 +1801,12 @@ function CreateDevEnv {
                 } while (!($baseApp))
                 $baseapp | Out-Host
             }
-            
+
             $artifact = Get-BCArtifactUrl `
                 -country $countryCode `
                 -version $baseApp.Version `
                 -select Closest
-            
+
             if ($artifact) {
                 Write-Host "Using Artifacts: $artifact"
             }
@@ -1640,14 +1815,14 @@ function CreateDevEnv {
             }
 
             $runAlPipelineParams += @{
-                "artifact" = $artifact
-                "bcAuthContext" = $authContext
-                "environment" = $environmentName
-                "containerName" = "bcServerFilesOnly"
+                "artifact"         = $artifact
+                "bcAuthContext"    = $authContext
+                "environment"      = $environmentName
+                "containerName"    = "bcServerFilesOnly"
                 "updateLaunchJson" = "Cloud Sandbox ($environmentName)"
             }
         }
-        
+
         "enableTaskScheduler",
         "assignPremiumPlan",
         "installTestRunner",
@@ -1658,7 +1833,7 @@ function CreateDevEnv {
         "enableAppSourceCop",
         "enablePerTenantExtensionCop",
         "enableUICop" | ForEach-Object {
-            if ($repo."$_") { $runAlPipelineParams += @{ "$_" = $true } }
+            if ($settings."$_") { $runAlPipelineParams += @{ "$_" = $true } }
         }
 
         $sharedFolder = ""
@@ -1667,40 +1842,42 @@ function CreateDevEnv {
         }
 
         Run-AlPipeline @runAlPipelineParams `
-            -vsixFile $repo.vsixFile `
+            -accept_insiderEula:$accept_insiderEula `
+            -vsixFile $settings.vsixFile `
             -pipelinename $workflowName `
             -imageName "" `
-            -memoryLimit $repo.memoryLimit `
+            -memoryLimit $settings.memoryLimit `
             -baseFolder $projectFolder `
             -sharedFolder $sharedFolder `
             -licenseFile $licenseFileUrl `
             -installApps $installApps `
             -installTestApps $installTestApps `
-            -installOnlyReferencedApps:$repo.installOnlyReferencedApps `
-            -appFolders $repo.appFolders `
-            -testFolders $repo.testFolders `
+            -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
+            -appFolders $settings.appFolders `
+            -testFolders $settings.testFolders `
             -testResultsFile $testResultsFile `
             -testResultsFormat 'JUnit' `
-            -customCodeCops $repo.customCodeCops `
+            -customCodeCops $settings.customCodeCops `
             -azureDevOps:($caller -eq 'AzureDevOps') `
             -gitLab:($caller -eq 'GitLab') `
             -gitHubActions:($caller -eq 'GitHubActions') `
-            -failOn $repo.failOn `
-            -treatTestFailuresAsWarnings:$repo.treatTestFailuresAsWarnings `
-            -rulesetFile $repo.rulesetFile `
-            -AppSourceCopMandatoryAffixes $repo.appSourceCopMandatoryAffixes `
-            -obsoleteTagMinAllowedMajorMinor $repo.obsoleteTagMinAllowedMajorMinor `
+            -failOn $settings.failOn `
+            -treatTestFailuresAsWarnings:$settings.treatTestFailuresAsWarnings `
+            -rulesetFile $settings.rulesetFile `
+            -enableExternalRulesets:$settings.enableExternalRulesets `
+            -AppSourceCopMandatoryAffixes $settings.appSourceCopMandatoryAffixes `
+            -obsoleteTagMinAllowedMajorMinor $settings.obsoleteTagMinAllowedMajorMinor `
             -doNotRunTests `
             -doNotRunBcptTests `
             -useDevEndpoint `
             -keepContainer
     }
     finally {
-        if ($loadBcContainerHelper) {
-            CleanupAfterBcContainerHelper -bcContainerHelperPath $bcContainerHelperPath
+        if ($removeEnvSecrets -and $env:Secrets) {
+            Remove-Item Env:\Secrets
         }
         if (Test-Path $dependenciesFolder) {
-            Get-ChildItem -Path $dependenciesFolder -Include * -File | ForEach-Object { $_.Delete()}
+            Get-ChildItem -Path $dependenciesFolder -Include * -File | ForEach-Object { $_.Delete() }
         }
     }
 }
@@ -1741,8 +1918,8 @@ function CheckAndCreateProjectFolder {
                 Set-Location $project
                 OutputWarning "Project folder doesn't exist, creating a new project folder and a default settings file with country us. Please modify if needed."
                 [ordered]@{
-                    "country" = "us"
-                    "appFolders" = @()
+                    "country"     = "us"
+                    "appFolders"  = @()
                     "testFolders" = @()
                 } | Set-JsonContentLF -path $ALGoSettingsFile
                 $createCodeWorkspace = $true
@@ -1753,7 +1930,7 @@ function CheckAndCreateProjectFolder {
         }
         if ($createCodeWorkspace) {
             [ordered]@{
-                "folders" = @( @{ "path" = ".AL-Go" } )
+                "folders"  = @( @{ "path" = ".AL-Go" } )
                 "settings" = @{}
             } | Set-JsonContentLF -path "$project.code-workspace"
         }
@@ -1774,30 +1951,21 @@ Function AnalyzeProjectDependencies {
     # Loop through all projects
     # Get all apps in the project
     # Get all dependencies for the apps
-    $projects | ForEach-Object {
-        $project = $_
+    foreach($project in $projects) {
         Write-Host "- Analyzing project: $project"
 
-        # Read project settings
-        $projectSettings = ReadSettings -baseFolder $baseFolder -project $project
+        $projectSettings = ReadSettings -project $project -baseFolder $baseFolder
+        ResolveProjectFolders -baseFolder $baseFolder -project $project -projectSettings ([ref] $projectSettings)
 
-        # Filter out app folders that doesn't contain an app.json file
-        $folders = @($projectSettings.appFolders) + @($projectSettings.testFolders) + @($projectSettings.bcptTestFolders) | ForEach-Object { 
-            $projectFolder = Join-Path $project $_
-            if (!(Test-Path $projectFolder -PathType Container)) {
-                Write-Host "::Warning::Folder $_ doesn't exist, skipping."
-            }
-            elseif (!(Test-Path (Join-Path $projectFolder 'app.json'))) {
-                Write-Host "::Warning::Folder $_ doesn't contain an app.json file, skipping."
-            }
-            else {
-                Resolve-Path $projectFolder -Relative
+        # App folders are relative to the AL-Go project folder. Convert them to relative to the base folder
+        Push-Location $baseFolder
+        try {
+            $folders = @($projectSettings.appFolders) + @($projectSettings.testFolders) + @($projectSettings.bcptTestFolders) | ForEach-Object {
+                return (Resolve-Path (Join-Path $baseFolder "$project/$_") -Relative)
             }
         }
-        # Default to scanning the project folder if no app folders are specified
-        if (-not $folders) {
-            Write-Host "No apps or tests folders found for project $project. Scanning for apps in the project folder."
-            $folders = @(Get-ChildItem -Path (Join-Path $baseFolder $project) -Recurse | Where-Object { $_.PSIsContainer -and (Test-Path (Join-Path $_.FullName 'app.json')) } | ForEach-Object { $_.FullName.Substring($baseFolder.Length+1) } )
+        finally {
+            Pop-Location
         }
 
         Write-Host "Folders containing apps are $($folders -join ',' )"
@@ -1806,7 +1974,7 @@ Function AnalyzeProjectDependencies {
         $apps = @()
         Sort-AppFoldersByDependencies -appFolders $folders -baseFolder $baseFolder -WarningAction SilentlyContinue -unknownDependencies ([ref]$unknownDependencies) -knownApps ([ref]$apps) | Out-Null
         $appDependencies."$project" = @{
-            "apps" = $apps
+            "apps"         = $apps
             "dependencies" = @($unknownDependencies | ForEach-Object { $_.Split(':')[0] })
         }
     }
@@ -1830,24 +1998,24 @@ Function AnalyzeProjectDependencies {
         # These projects can be built in parallel and are added to the build order
         # The projects that are added to the build order are removed from the list of projects
         # The loop continues until all projects have been added to the build order
-        $projects | ForEach-Object {
-            $project = $_
+        foreach($project in $projects) {
             Write-Host "- $project"
             # Find all project dependencies for the current project
             $dependencies = $appDependencies."$project".dependencies
             # Loop through all dependencies and locate the projects, containing the apps for which the current project has a dependency
-            $foundDependencies = @($dependencies | ForEach-Object {
-                $dependency = $_
+            $foundDependencies = @()
+            foreach($dependency in $dependencies) {
                 # Find the project that contains the app for which the current project has a dependency
-                $depProject = $projects | Where-Object { $_ -ne $project -and $appDependencies."$_".apps -contains $dependency }
+                $depProjects = @($projects | Where-Object { $_ -ne $project -and $appDependencies."$_".apps -contains $dependency })
                 # Add this project and all projects on which that project has a dependency to the list of dependencies for the current project
-                $depProject | ForEach-Object {
-                    $_
-                    if ($projectDependencies.Value.Keys -contains $_) {
-                        $projectDependencies.value."$_"
+                foreach($depProject in $depProjects) {
+                    $foundDependencies += $depProject
+                    if ($projectDependencies.Value.Keys -contains $depProject) {
+                        $foundDependencies += $projectDependencies.value."$depProject"
                     }
                 }
-            } | Select-Object -Unique)
+            }
+            $foundDependencies = @($foundDependencies | Select-Object -Unique)
             # foundDependencies now contains all projects that the current project has a dependency on
             # Update ref variable projectDependencies for this project
             if ($projectDependencies.Value.Keys -notcontains $project) {
@@ -1855,12 +2023,12 @@ Function AnalyzeProjectDependencies {
                 # Update the dependency list for that project if it contains the current project, which might lead to a changed dependency list
                 # This is needed because we are looping through the projects in a any order
                 $keys = @($projectDependencies.value.Keys)
-                $keys | ForEach-Object {
-                    if ($projectDependencies.value."$_" -contains $project) {
-                        $projectDeps = @( $projectDependencies.value."$_" )
-                        $projectDependencies.value."$_" = @( @($projectDeps + $foundDependencies) | Select-Object -Unique )
-                        if (Compare-Object -ReferenceObject $projectDependencies.value."$_" -differenceObject $projectDeps) {
-                            Write-Host "Add ProjectDependencies $($foundDependencies -join ',') to $_"
+                foreach($key in $keys) {
+                    if ($projectDependencies.value."$key" -contains $project) {
+                        $projectDeps = @( $projectDependencies.value."$key" )
+                        $projectDependencies.value."$key" = @( @($projectDeps + $foundDependencies) | Select-Object -Unique )
+                        if (Compare-Object -ReferenceObject $projectDependencies.value."$key" -differenceObject $projectDeps) {
+                            Write-Host "Add ProjectDependencies $($foundDependencies -join ',') to $key"
                         }
                     }
                 }
@@ -1870,14 +2038,14 @@ Function AnalyzeProjectDependencies {
             if ($foundDependencies) {
                 Write-Host "Found dependencies to projects: $($foundDependencies -join ", ")"
                 # Add project to buildAlso for this dependency to ensure that this project also gets build when the dependency is built
-                $foundDependencies | ForEach-Object { 
-                    if ($buildAlso.value.Keys -contains $_) {
-                        if ($buildAlso.value."$_" -notcontains $project) {
-                            $buildAlso.value."$_" += @( $project )
+                foreach($dependency in $foundDependencies) {
+                    if ($buildAlso.value.Keys -contains $dependency) {
+                        if ($buildAlso.value."$dependency" -notcontains $project) {
+                            $buildAlso.value."$dependency" += @( $project )
                         }
                     }
                     else {
-                        $buildAlso.value."$_" = @( $project )
+                        $buildAlso.value."$dependency" = @( $project )
                     }
                 }
             }
@@ -1890,9 +2058,9 @@ Function AnalyzeProjectDependencies {
             throw "Circular project reference encountered, cannot determine build order"
         }
         Write-Host "#$no - build projects: $($thisJob -join ", ")"
-        
+
         $projectsOrder += @{'projects' = $thisJob; 'projectsCount' = $thisJob.Count }
-        
+
         $projects = @($projects | Where-Object { $thisJob -notcontains $_ })
         $no++
     }
@@ -1904,10 +2072,10 @@ function GetBaseFolder {
     Param(
         [string] $folder
     )
-    
+
     Push-Location $folder
     try {
-        $baseFolder = invoke-git rev-parse --show-toplevel -returnValue
+        $baseFolder = invoke-git -silent rev-parse --show-toplevel -returnValue
     }
     finally {
         Pop-Location
@@ -1916,7 +2084,7 @@ function GetBaseFolder {
     if (!$baseFolder -or !(Test-Path (Join-Path $baseFolder '.github') -PathType Container)) {
         throw "Cannot determine base folder from folder $folder."
     }
-    
+
     return $baseFolder
 }
 
@@ -1940,46 +2108,36 @@ function GetProject {
     $project
 }
 
-function Determine-ArtifactUrl {
+function DetermineArtifactUrl {
     Param(
         [hashtable] $projectSettings,
-        [string] $insiderSasToken = "",
         [switch] $doNotIssueWarnings
     )
 
     $artifact = $projectSettings.artifact
     if ($artifact.Contains('{INSIDERSASTOKEN}')) {
-        if ($insiderSasToken) {
-            $artifact = $artifact.replace('{INSIDERSASTOKEN}', $insiderSasToken)
-        }
-        else {
-            throw "Artifact definition $artifact requires you to create a secret called InsiderSasToken, containing the Insider SAS Token from https://aka.ms/collaborate"
-        }
+        $artifact = $artifact.replace('{INSIDERSASTOKEN}', '')
+        Write-Host "::Warning::Please update your artifact setting and remove {INSIDERSASTOKEN} from the setting. This is no longer needed."
     }
 
     Write-Host "Checking artifact setting for project"
     if ($artifact -eq "" -and $projectSettings.updateDependencies) {
         $artifact = Get-BCArtifactUrl -country $projectSettings.country -select all | Where-Object { [Version]$_.Split("/")[4] -ge [Version]$projectSettings.applicationDependency } | Select-Object -First 1
         if (-not $artifact) {
-            if ($insiderSasToken) {
-                $artifact = Get-BCArtifactUrl -storageAccount bcinsider -country $projectSettings.country -select all -sasToken $insiderSasToken | Where-Object { [Version]$_.Split("/")[4] -ge [Version]$projectSettings.applicationDependency } | Select-Object -First 1
-                if (-not $artifact) {
-                    throw "No artifacts found for application dependency $($projectSettings.applicationDependency)."
-                }
-            }
-            else {
-                throw "No artifacts found for application dependency $($projectSettings.applicationDependency). If you are targetting an insider version, you need to create a secret called InsiderSasToken, containing the Insider SAS Token from https://aka.ms/collaborate"
+            # Check Insider Artifacts
+            $artifact = Get-BCArtifactUrl -storageAccount bcinsider -accept_insiderEula -country $projectSettings.country -select all | Where-Object { [Version]$_.Split("/")[4] -ge [Version]$projectSettings.applicationDependency } | Select-Object -First 1
+            if (-not $artifact) {
+                throw "No artifacts found for application dependency $($projectSettings.applicationDependency)."
             }
         }
     }
-    
+
     if ($artifact -like "https://*") {
         $artifactUrl = $artifact
         $storageAccount = ("$artifactUrl////".Split('/')[2]).Split('.')[0]
         $artifactType = ("$artifactUrl////".Split('/')[3])
         $version = ("$artifactUrl////".Split('/')[4])
         $country = ("$artifactUrl////".Split('?')[0].Split('/')[5])
-        $sasToken = "$($artifactUrl)?".Split('?')[1]
     }
     else {
         $segments = "$artifact/////".Split('/')
@@ -1988,8 +2146,7 @@ function Determine-ArtifactUrl {
         $version = $segments[2]
         $country = $segments[3]; if ($country -eq "") { $country = $projectSettings.country }
         $select = $segments[4]; if ($select -eq "") { $select = "latest" }
-        $sasToken = $segments[5]
-        $artifactUrl = Get-BCArtifactUrl -storageAccount $storageAccount -type $artifactType -version $version -country $country -select $select -sasToken $sasToken | Select-Object -First 1
+        $artifactUrl = Get-BCArtifactUrl -storageAccount $storageAccount -type $artifactType -version $version -country $country -select $select -accept_insiderEula | Select-Object -First 1
         if (-not $artifactUrl) {
             throw "No artifacts found for the artifact setting ($artifact) in $ALGoSettingsFile"
         }
@@ -2005,10 +2162,10 @@ function Determine-ArtifactUrl {
         # AT is the latest published language - use this to determine available country codes (combined with mapping)
         $ver = [Version]$version
         Write-Host "https://$storageAccount/$artifactType/$version/$country"
-        $atArtifactUrl = Get-BCArtifactUrl -storageAccount $storageAccount -type $artifactType -country at -version "$($ver.Major).$($ver.Minor)" -select Latest -sasToken $sasToken
+        $atArtifactUrl = Get-BCArtifactUrl -storageAccount $storageAccount -type $artifactType -country at -version "$($ver.Major).$($ver.Minor)" -select Latest -accept_insiderEula
         Write-Host "Latest AT artifacts $atArtifactUrl"
         $latestATversion = $atArtifactUrl.Split('/')[4]
-        $countries = Get-BCArtifactUrl -storageAccount $storageAccount -type $artifactType -version $latestATversion -sasToken $sasToken -select All | ForEach-Object { 
+        $countries = Get-BCArtifactUrl -storageAccount $storageAccount -type $artifactType -version $latestATversion -accept_insiderEula -select All | ForEach-Object {
             $countryArtifactUrl = $_.Split('?')[0] # remove sas token
             $countryArtifactUrl.Split('/')[5] # get country
         }
@@ -2022,7 +2179,40 @@ function Determine-ArtifactUrl {
         if ($illegalCountries) {
             throw "additionalCountries contains one or more invalid country codes ($($illegalCountries -join ",")) in $ALGoSettingsFile."
         }
-        $artifactUrl = $artifactUrl.Replace($artifactUrl.Split('/')[4],$atArtifactUrl.Split('/')[4])
+        $artifactUrl = $artifactUrl.Replace($artifactUrl.Split('/')[4], $atArtifactUrl.Split('/')[4])
     }
     return $artifactUrl
+}
+
+function RetryCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ScriptBlock]$Command,
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 3,
+        [Parameter(Mandatory = $false)]
+        [int]$RetryDelaySeconds = 5,
+        [Object[]] $argumentList
+    )
+
+    $retryCount = 0
+    while ($retryCount -lt $MaxRetries) {
+        try {
+            Invoke-Command $Command -ArgumentList $argumentList
+            if ($LASTEXITCODE -ne 0) {
+                throw "Command failed with exit code $LASTEXITCODE"
+            }
+            break
+        }
+        catch {
+            $retryCount++
+            if ($retryCount -eq $MaxRetries) {
+                throw $_
+            }
+            else {
+                Write-Host "Retrying after $RetryDelaySeconds seconds..."
+                Start-Sleep -Seconds $RetryDelaySeconds
+            }
+        }
+    }
 }

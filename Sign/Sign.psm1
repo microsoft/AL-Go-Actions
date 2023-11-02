@@ -1,13 +1,12 @@
-function Get-NavSipFromArtifacts
+function GetNavSipFromArtifacts
 (
     [string] $NavSipDestination
-) 
+)
 {
-    #TODO: It would be nice with a different approach here - This downloads a lot of unnecessary stuff
     $artifactTempFolder = Join-Path $([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
 
     try {
-        Download-Artifacts -artifactUrl (Get-BCArtifactUrl -type Sandbox) -includePlatform -basePath $artifactTempFolder | Out-Null
+        Download-Artifacts -artifactUrl (Get-BCArtifactUrl -type Sandbox -country core) -basePath $artifactTempFolder | Out-Null
         Write-Host "Downloaded artifacts to $artifactTempFolder"
         $navsip = Get-ChildItem -Path $artifactTempFolder -Filter "navsip.dll" -Recurse
         Write-Host "Found navsip at $($navsip.FullName)"
@@ -19,12 +18,16 @@ function Get-NavSipFromArtifacts
     }
 }
 
+<#
+.SYNOPSIS
+Register the navsip.dll in the system32 folder
+#>
 function Register-NavSip() {
     $navSipDestination = "C:\Windows\System32"
     $navSipDllPath = Join-Path $navSipDestination "navsip.dll"
     try {
         if (-not (Test-Path $navSipDllPath)) {
-            Get-NavSipFromArtifacts -NavSipDestination $navSipDllPath
+            GetNavSipFromArtifacts -NavSipDestination $navSipDllPath
         }
 
         Write-Host "Unregistering dll $navSipDllPath"

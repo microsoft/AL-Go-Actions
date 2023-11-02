@@ -1,4 +1,5 @@
 function GetExtendedErrorMessage {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingEmptyCatchBlock", "", Justification="We want to ignore errors")]
     Param(
         $errorRecord
     )
@@ -10,7 +11,9 @@ function GetExtendedErrorMessage {
         $errorDetails = $errorRecord.ErrorDetails | ConvertFrom-Json
         $message += " $($errorDetails.error)`n$($errorDetails.error_description)"
     }
-    catch {}
+    catch {
+        # ignore errors
+    }
     try {
         if ($exception -is [System.Management.Automation.MethodInvocationException]) {
             $exception = $exception.InnerException
@@ -21,7 +24,10 @@ function GetExtendedErrorMessage {
             if ($webResponse.StatusDescription) {
                 $message += "`n$($webResponse.StatusDescription)"
             }
-        } catch {}
+        }
+        catch {
+            # ignore errors
+        }
         $reqstream = $webResponse.GetResponseStream()
         $sr = new-object System.IO.StreamReader $reqstream
         $result = $sr.ReadToEnd()
@@ -38,9 +44,13 @@ function GetExtendedErrorMessage {
                 $message += " (ms-correlation-x = $correlationX)"
             }
         }
-        catch {}
+        catch {
+            # ignore errors
+        }
     }
-    catch{}
+    catch{
+        # ignore errors
+    }
     $message
 }
 
@@ -95,7 +105,9 @@ function InvokeWebRequest {
                 Invoke-WebRequest  @params -Uri $uri
                 return
             }
-            catch {}
+            catch {
+                Write-Host "Retry failed as well"
+            }
         }
         if ($ignoreErrors.IsPresent) {
             Write-Host $message
@@ -107,7 +119,7 @@ function InvokeWebRequest {
     }
 }
 
-function Get-dependencies {
+function GetDependencies {
     Param(
         $probingPathsJson,
         [string] $api_url = $ENV:GITHUB_API_URL,
@@ -119,25 +131,29 @@ function Get-dependencies {
     }
 
     $downloadedList = @()
-    'Apps','TestApps' | ForEach-Object {
-        $mask = $_
-        Write-Host "Locating all $mask artifacts from probing paths"
-        $probingPathsJson | ForEach-Object {
-            $dependency = $_
+    foreach($mask in 'Apps','TestApps') {
+        foreach($dependency in $probingPathsJson) {
             $projects = $dependency.projects
-            
+            $buildMode = $dependency.buildMode
+
+            # change the mask to include the build mode
+            if($buildMode -ne "Default") {
+                $mask = "$buildMode$mask"
+            }
+
+            Write-Host "Locating $mask artifacts for projects: $projects"
+
             if ($dependency.release_status -eq "thisBuild") {
                 $missingProjects = @()
-                $projects.Split(',') | ForEach-Object {
-                    $project = $_
+                foreach($project in $projects.Split(',')) {
                     $project = $project.Replace('\','_').Replace('/','_') # sanitize project name
-                    
+
                     $downloadName = Join-Path $saveToPath "thisbuild-$project-$($mask)"
-                    
+
                     if (Test-Path $downloadName -PathType Container) {
                         $folder = Get-Item $downloadName
                         Get-ChildItem -Path $folder | ForEach-Object {
-                            if ($mask -eq 'TestApps') {
+                            if ($mask -like '*TestApps') {
                                 $downloadedList += @("($($_.FullName))")
                             }
                             else {
@@ -146,14 +162,14 @@ function Get-dependencies {
                             Write-Host "$($_.FullName) found from previous job"
                         }
                     }
-                    elseif ($mask -ne 'TestApps') {
-                        Write-Host "$_ not built, downloading from artifacts"
-                        $missingProjects += @($_)
+                    elseif ($mask -notlike '*TestApps') {
+                        Write-Host "$project not built, downloading from artifacts"
+                        $missingProjects += @($project)
                     }
                 }
                 if ($missingProjects) {
                     $dependency.release_status = 'latestBuild'
-                    $dependency.branch = "main"
+                    $dependency.branch = $dependency.baseBranch
                     $dependency.projects = $missingProjects -join ","
                 }
             }
@@ -165,7 +181,7 @@ function Get-dependencies {
                     $artifacts | ForEach-Object {
                         $download = DownloadArtifact -path $saveToPath -token $dependency.authTokenSecret -artifact $_
                         if ($download) {
-                            if ($mask -eq 'TestApps') {
+                            if ($mask -like '*TestApps') {
                                 $downloadedList += @("($download)")
                             }
                             else {
@@ -200,7 +216,7 @@ function Get-dependencies {
 
                 $download = DownloadRelease -token $dependency.authTokenSecret -projects $projects -api_url $api_url -repository $repository -path $saveToPath -release $release -mask $mask
                 if ($download) {
-                    if ($mask -eq 'TestApps') {
+                    if ($mask -like '*TestApps') {
                         $downloadedList += @("($download)")
                     }
                     else {
@@ -214,6 +230,7 @@ function Get-dependencies {
 }
 
 function CmdDo {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingEmptyCatchBlock", "", Justification="We want to ignore errors")]
     Param(
         [string] $command = "",
         [string] $arguments = "",
@@ -227,7 +244,6 @@ function CmdDo {
     $oldEncoding = [Console]::OutputEncoding
     try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
     try {
-        $result = $true
         $pinfo = New-Object System.Diagnostics.ProcessStartInfo
         $pinfo.FileName = $command
         $pinfo.RedirectStandardError = $true
@@ -257,7 +273,7 @@ function CmdDo {
         if ("$err" -ne "") {
             $message += "$err"
         }
-        
+
         $message = $message.Trim()
 
         if ($p.ExitCode -eq 0) {
@@ -289,16 +305,21 @@ function invoke-gh {
         [parameter(mandatory = $false, position = 1, ValueFromRemainingArguments = $true)] $remaining
     )
 
-    $arguments = "$command "
-    $remaining | ForEach-Object {
-        if ("$_".IndexOf(" ") -ge 0 -or "$_".IndexOf('"') -ge 0) {
-            $arguments += """$($_.Replace('"','\"'))"" "
+    Process {
+        $arguments = "$command "
+        foreach($parameter in $remaining) {
+            if ("$parameter".IndexOf(" ") -ge 0 -or "$parameter".IndexOf('"') -ge 0) {
+                if ($parameter.length -gt 15000) {
+                    $parameter = "$($parameter.Substring(0,15000))...`n`n**Truncated due to size limits!**"
+                }
+                $arguments += """$($parameter.Replace('"','\"'))"" "
+            }
+            else {
+                $arguments += "$parameter "
+            }
         }
-        else {
-            $arguments += "$_ "
-        }
+        cmdDo -command gh -arguments $arguments -silent:$silent -returnValue:$returnValue -inputStr $inputStr
     }
-    cmdDo -command gh -arguments $arguments -silent:$silent -returnValue:$returnValue -inputStr $inputStr
 }
 
 function invoke-git {
@@ -311,16 +332,18 @@ function invoke-git {
         [parameter(mandatory = $false, position = 1, ValueFromRemainingArguments = $true)] $remaining
     )
 
-    $arguments = "$command "
-    $remaining | ForEach-Object {
-        if ("$_".IndexOf(" ") -ge 0 -or "$_".IndexOf('"') -ge 0) {
-            $arguments += """$($_.Replace('"','\"'))"" "
+    Process {
+        $arguments = "$command "
+        foreach($parameter in $remaining) {
+            if ("$parameter".IndexOf(" ") -ge 0 -or "$parameter".IndexOf('"') -ge 0) {
+                $arguments += """$($parameter.Replace('"','\"'))"" "
+            }
+            else {
+                $arguments += "$parameter "
+            }
         }
-        else {
-            $arguments += "$_ "
-        }
+        cmdDo -command git -arguments $arguments -silent:$silent -returnValue:$returnValue -inputStr $inputStr
     }
-    cmdDo -command git -arguments $arguments -silent:$silent -returnValue:$returnValue -inputStr $inputStr
 }
 
 # Convert a semantic version object to a semantic version string
@@ -343,17 +366,20 @@ function SemVerObjToSemVerStr {
         [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
         $semVerObj
     )
-    try {
-        $str = "$($semVerObj.Prefix)$($semVerObj.Major).$($semVerObj.Minor).$($semVerObj.Patch)"
-        for ($i=0; $i -lt 5; $i++) {
-            $seg = $semVerObj."Addt$i"
-            if ($seg -eq 'zzz') { break }
-            if ($i -eq 0) { $str += "-$($seg)" } else { $str += ".$($seg)" }
+
+    Process {
+        try {
+            $str = "$($semVerObj.Prefix)$($semVerObj.Major).$($semVerObj.Minor).$($semVerObj.Patch)"
+            for ($i=0; $i -lt 5; $i++) {
+                $seg = $semVerObj."Addt$i"
+                if ($seg -eq 'zzz') { break }
+                if ($i -eq 0) { $str += "-$($seg)" } else { $str += ".$($seg)" }
+            }
+            $str
         }
-        $str
-    }
-    catch {
-        throw "'$SemVerObj' cannot be recognized as a semantic version object (internal error)"
+        catch {
+            throw "'$SemVerObj' cannot be recognized as a semantic version object (internal error)"
+        }
     }
 }
 
@@ -384,76 +410,78 @@ function SemVerStrToSemVerObj {
         [switch] $allowMajorMinorOnly
     )
 
-    $obj = New-Object PSCustomObject
-    try {
-        # Only allowed prefix is a 'v'.
-        # This is supported by GitHub when sorting tags
-        $prefix = ''
-        $verstr = $semVerStr
-        if ($semVerStr -like 'v*') {
-            $prefix = 'v'
-            $verStr = $semVerStr.Substring(1)
-        }
-        # Next part is a version number with 2 or 3 segments
-        # 2 segments are allowed only if $allowMajorMinorOnly is specified
-        $version = [System.Version]"$($verStr.split('-')[0])"
-        if ($version.Revision -ne -1) { throw "not semver" }
-        if ($version.Build -eq -1) {
-            if ($allowMajorMinorOnly) {
-                $version = [System.Version]"$($version.Major).$($version.Minor).0"
-                $idx = $semVerStr.IndexOf('-')
-                if ($idx -eq -1) {
-                    $semVerStr = "$semVerStr.0"
-                }
-                else {
-                    $semVerstr = $semVerstr.insert($idx, '.0')
-                }
+    Process {
+        $obj = New-Object PSCustomObject
+        try {
+            # Only allowed prefix is a 'v'.
+            # This is supported by GitHub when sorting tags
+            $prefix = ''
+            $verstr = $semVerStr
+            if ($semVerStr -like 'v*') {
+                $prefix = 'v'
+                $verStr = $semVerStr.Substring(1)
             }
-            else {
-                throw "not semver"
-            }
-        }
-        # Add properties to the object
-        $obj | Add-Member -MemberType NoteProperty -Name "Prefix" -Value $prefix
-        $obj | Add-Member -MemberType NoteProperty -Name "Major" -Value ([int]$version.Major)
-        $obj | Add-Member -MemberType NoteProperty -Name "Minor" -Value ([int]$version.Minor)
-        $obj | Add-Member -MemberType NoteProperty -Name "Patch" -Value ([int]$version.Build)
-        0..4 | ForEach-Object {
-            # default segments to 'zzz' for sorting of SemVer Objects to work as GitHub does
-            $obj | Add-Member -MemberType NoteProperty -Name "Addt$_" -Value 'zzz'
-        }
-        $idx = $verStr.IndexOf('-')
-        if ($idx -gt 0) {
-            $segments = $verStr.SubString($idx+1).Split('.')
-            if ($segments.Count -gt 5) {
-                throw "max. 5 segments"
-            }
-            # Add all 5 segments to the object
-            # If the segment is a number, it is converted to an integer
-            # If the segment is a string, it cannot be -ge 'zzz' (would be sorted wrongly)
-            0..($segments.Count-1) | ForEach-Object {
-                $result = 0
-                if ([int]::TryParse($segments[$_], [ref] $result)) {
-                    $obj."Addt$_" = [int]$result
-                }
-                else {
-                    if ($segments[$_] -ge 'zzz') {
-                        throw "Unsupported segment"
+            # Next part is a version number with 2 or 3 segments
+            # 2 segments are allowed only if $allowMajorMinorOnly is specified
+            $version = [System.Version]"$($verStr.split('-')[0])"
+            if ($version.Revision -ne -1) { throw "not semver" }
+            if ($version.Build -eq -1) {
+                if ($allowMajorMinorOnly) {
+                    $version = [System.Version]"$($version.Major).$($version.Minor).0"
+                    $idx = $semVerStr.IndexOf('-')
+                    if ($idx -eq -1) {
+                        $semVerStr = "$semVerStr.0"
                     }
-                    $obj."Addt$_" = $segments[$_]
+                    else {
+                        $semVerstr = $semVerstr.insert($idx, '.0')
+                    }
+                }
+                else {
+                    throw "not semver"
                 }
             }
+            # Add properties to the object
+            $obj | Add-Member -MemberType NoteProperty -Name "Prefix" -Value $prefix
+            $obj | Add-Member -MemberType NoteProperty -Name "Major" -Value ([int]$version.Major)
+            $obj | Add-Member -MemberType NoteProperty -Name "Minor" -Value ([int]$version.Minor)
+            $obj | Add-Member -MemberType NoteProperty -Name "Patch" -Value ([int]$version.Build)
+            0..4 | ForEach-Object {
+                # default segments to 'zzz' for sorting of SemVer Objects to work as GitHub does
+                $obj | Add-Member -MemberType NoteProperty -Name "Addt$_" -Value 'zzz'
+            }
+            $idx = $verStr.IndexOf('-')
+            if ($idx -gt 0) {
+                $segments = $verStr.SubString($idx+1).Split('.')
+                if ($segments.Count -gt 5) {
+                    throw "max. 5 segments"
+                }
+                # Add all 5 segments to the object
+                # If the segment is a number, it is converted to an integer
+                # If the segment is a string, it cannot be -ge 'zzz' (would be sorted wrongly)
+                0..($segments.Count-1) | ForEach-Object {
+                    $result = 0
+                    if ([int]::TryParse($segments[$_], [ref] $result)) {
+                        $obj."Addt$_" = [int]$result
+                    }
+                    else {
+                        if ($segments[$_] -ge 'zzz') {
+                            throw "Unsupported segment"
+                        }
+                        $obj."Addt$_" = $segments[$_]
+                    }
+                }
+            }
+            # Check that the object can be converted back to the original string
+            $newStr = SemVerObjToSemVerStr -semVerObj $obj
+            if ($newStr -cne $semVerStr) {
+                throw "Not equal"
+            }
         }
-        # Check that the object can be converted back to the original string
-        $newStr = SemVerObjToSemVerStr -semVerObj $obj
-        if ($newStr -cne $semVerStr) {
-            throw "Not equal"
+        catch {
+            throw "'$semVerStr' cannot be recognized as a semantic version string (https://semver.org)"
         }
+        $obj
     }
-    catch {
-        throw "'$semVerStr' cannot be recognized as a semantic version string (https://semver.org)"
-    }
-    $obj
 }
 
 function GetReleases {
@@ -468,9 +496,9 @@ function GetReleases {
     if ($releases.Count -gt 1) {
         # Sort by SemVer tag
         try {
-            $sortedReleases = $releases.tag_name | 
-                ForEach-Object { SemVerStrToSemVerObj -semVerStr $_ } | 
-                Sort-Object -Property Major,Minor,Patch,Addt0,Addt1,Addt2,Addt3,Addt4 -Descending | 
+            $sortedReleases = $releases.tag_name |
+                ForEach-Object { SemVerStrToSemVerObj -semVerStr $_ } |
+                Sort-Object -Property Major,Minor,Patch,Addt0,Addt1,Addt2,Addt3,Addt4 -Descending |
                 ForEach-Object { SemVerObjToSemVerStr -semVerObj $_ } | ForEach-Object {
                     $tag_name = $_
                     $releases | Where-Object { $_.tag_name -eq $tag_name }
@@ -494,7 +522,7 @@ function GetLatestRelease {
         [string] $repository = $ENV:GITHUB_REPOSITORY,
         [string] $ref = $ENV:GITHUB_REFNAME
     )
-    
+
     Write-Host "Getting the latest release from $api_url/repos/$repository/releases/latest - branch $ref"
     # Get all releases from GitHub, sorted by SemVer tag
     # If any release tag is not a valid SemVer tag, use default GitHub sorting and issue a warning
@@ -519,9 +547,13 @@ function GetLatestRelease {
 function GetHeader {
     param (
         [string] $token,
-        [string] $accept = "application/vnd.github.v3+json"
+        [string] $accept = "application/vnd.github+json",
+        [string] $apiVersion = "2022-11-28"
     )
-    $headers = @{ "Accept" = $accept }
+    $headers = @{
+        "Accept" = $accept
+        "X-GitHub-Api-Version" = $apiVersion
+    }
     if (![string]::IsNullOrEmpty($token)) {
         $headers["Authorization"] = "token $token"
     }
@@ -535,20 +567,24 @@ function GetReleaseNotes {
         [string] $repository = $ENV:GITHUB_REPOSITORY,
         [string] $api_url = $ENV:GITHUB_API_URL,
         [string] $tag_name,
-        [string] $previous_tag_name
+        [string] $previous_tag_name,
+        [string] $target_commitish
     )
-    
+
     Write-Host "Generating release note $api_url/repos/$repository/releases/generate-notes"
 
     $postParams = @{
         tag_name = $tag_name;
     }
 
-    if (-not [string]::IsNullOrEmpty($previous_tag_name)) {
+    if ($previous_tag_name) {
         $postParams["previous_tag_name"] = $previous_tag_name
     }
+    if ($target_commitish) {
+        $postParams["target_commitish"] = $target_commitish
+    }
 
-    InvokeWebRequest -Headers (GetHeader -token $token) -Method POST -Body ($postParams | ConvertTo-Json) -Uri "$api_url/repos/$repository/releases/generate-notes" 
+    InvokeWebRequest -Headers (GetHeader -token $token) -Method POST -Body ($postParams | ConvertTo-Json) -Uri "$api_url/repos/$repository/releases/generate-notes"
 }
 
 function DownloadRelease {
@@ -567,20 +603,20 @@ function DownloadRelease {
     if ([string]::IsNullOrEmpty($token)) {
         $token = invoke-gh -silent -returnValue auth token
     }
-    $headers = @{ 
-        "Accept"        = "application/octet-stream"
-        "Authorization" = "token $token"
-    }
-    $projects.Split(',') | ForEach-Object {
-        $project = $_.Replace('\','_').Replace('/','_')
+    $headers = GetHeader -token $token -accept "application/octet-stream"
+    foreach($project in $projects.Split(',')) {
+        $project = $project.Replace('\','_').Replace('/','_')
         Write-Host "project '$project'"
-        
-        $release.assets | Where-Object { $_.name -like "$project-*-$mask-*.zip" -or $_.name -like "$project-$mask-*.zip" } | ForEach-Object {
-            $uri = "$api_url/repos/$repository/releases/assets/$($_.id)"
+        $assetPattern1 = "$project-*-$mask-*.zip"
+        $assetPattern2 = "$project-$mask-*.zip"
+        Write-Host "AssetPatterns: '$assetPattern1' | '$assetPattern2'"
+        $assets = @($release.assets | Where-Object { $_.name -like $assetPattern1 -or $_.name -like $assetPattern2 })
+        foreach($asset in $assets) {
+            $uri = "$api_url/repos/$repository/releases/assets/$($asset.id)"
             Write-Host $uri
-            $filename = Join-Path $path $_.name
-            InvokeWebRequest -Headers $headers -Uri $uri -OutFile $filename 
-            return $filename
+            $filename = Join-Path $path $asset.name
+            InvokeWebRequest -Headers $headers -Uri $uri -OutFile $filename
+            $filename
         }
     }
 }
@@ -612,7 +648,9 @@ function Get-ContentLF {
         [string] $path
     )
 
-    (Get-Content -Path $path -Encoding UTF8 -Raw).Replace("`r", "").TrimEnd("`n")
+    Process {
+        (Get-Content -Path $path -Encoding UTF8 -Raw).Replace("`r", "").TrimEnd("`n")
+    }
 }
 
 # Set-Content defaults to culture specific ANSI encoding, which is not what we want
@@ -626,14 +664,16 @@ function Set-ContentLF {
         $content
     )
 
-    $path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
-    if ($content -is [array]) {
-        $content = $content -join "`n"
+    Process {
+        $path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+        if ($content -is [array]) {
+            $content = $content -join "`n"
+        }
+        else {
+            $content = "$content".Replace("`r", "")
+        }
+        [System.IO.File]::WriteAllText($path, "$content`n")
     }
-    else {
-        $content = "$content".Replace("`r", "")
-    }
-    [System.IO.File]::WriteAllText($path, "$content`n")
 }
 
 # Format Object to JSON and write to file with LF line endings and formatted as PowerShell 7 would do it
@@ -654,14 +694,16 @@ function Set-JsonContentLF {
         [object] $object
     )
 
-    $object | ConvertTo-Json -Depth 99 | Set-ContentLF -path $path
-    if ($PSVersionTable.PSVersion.Major -lt 6) {
-        try {
-            $path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
-            . pwsh (Join-Path $PSScriptRoot 'prettyfyjson.ps1') $path
-        }
-        catch {
-            Write-Host "WARNING: pwsh (PowerShell 7) not installed, json will be formatted by PowerShell $($PSVersionTable.PSVersion)"
+    Process {
+        $object | ConvertTo-Json -Depth 99 | Set-ContentLF -path $path
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            try {
+                $path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+                . pwsh (Join-Path $PSScriptRoot 'prettyfyjson.ps1') $path
+            }
+            catch {
+                Write-Host "WARNING: pwsh (PowerShell 7) not installed, json will be formatted by PowerShell $($PSVersionTable.PSVersion)"
+            }
         }
     }
 }
@@ -678,34 +720,74 @@ function GetArtifacts {
     )
 
     $headers = GetHeader -token $token
-    $allArtifacts = @()
-    $per_page = 100
-    $page = 1
+    $total_count = 0
     if ($version -eq 'latest') { $version = '*' }
-    Write-Host "Analyzing artifacts"
-    do {
-        $uri = "$api_url/repos/$repository/actions/artifacts?per_page=$($per_page)&page=$($page)"
+    # Download all artifacts matching branch and version
+    # We might have results from multiple workflow runs, but we will have all artifacts from the workflow run that created the first matching artifact
+    # Use the buildOutput artifact to determine the workflow run id (as that will always be there)
+    $artifactPattern = "*-$branch-*-$version"
+    # Use buildOutput artifact to determine the workflow run id to avoid excessive API calls
+    # Reason: A project called xx-main will match the artifact pattern *-main-*-version, and there might not be any artifacts matching the mask
+    $buildOutputPattern = "*-$branch-BuildOutput-$version"
+    Write-Host "Analyzing artifacts matching $artifactPattern"
+    while ($true) {
+        if ($total_count -eq 0) {
+            # First iteration - initialize variables
+            $matchingArtifacts = @()
+            $buildOutputArtifacts = @()
+            $per_page = 100
+            $page_no = 1
+        }
+        $uri = "$api_url/repos/$repository/actions/artifacts?per_page=$($per_page)&page=$($page_no)"
         Write-Host $uri
-        $artifactsJson = InvokeWebRequest -Headers $headers -Uri $uri
-        $artifacts = $artifactsJson | ConvertFrom-Json
-        $page++
-        $allArtifacts += @($artifacts.artifacts | Where-Object { $_.name -like "*-$branch-$mask-$version" })
-        $result = @()
-        $allArtifactsFound = $true
-        $projects.Split(',') | ForEach-Object {
-            $project = $_.Replace('\','_').Replace('/','_')
-            Write-Host "project '$project'"
-            $projectArtifact = $allArtifacts | Where-Object { $_.name -like "$project-$branch-$mask-$version" } | Select-Object -First 1
-            if ($projectArtifact) {
-                $result += @($projectArtifact)
-            }
-            else {
-                $allArtifactsFound = $false
-                $result = @()
+        $artifacts = InvokeWebRequest -Headers $headers -Uri $uri | ConvertFrom-Json
+        # If no artifacts are read, we are done
+        if ($artifacts.artifacts.Count -eq 0) {
+            break
+        }
+        if ($total_count -eq 0) {
+            $total_count = $artifacts.total_count
+        }
+        elseif ($total_count -ne $artifacts.total_count) {
+            # The total count changed, restart the loop
+            $total_count = 0
+            continue
+        }
+        $matchingArtifacts += @($artifacts.artifacts | Where-Object { !$_.expired -and $_.name -like $artifactPattern })
+        $buildOutputArtifacts += @($artifacts.artifacts | Where-Object { !$_.expired -and $_.name -like $buildOutputPattern })
+        if ($buildOutputArtifacts.Count -gt 0) {
+            # We have matching artifacts.
+            # If the last artifact in the list of artifacts read is not from the same workflow run, there are no more matching artifacts
+            if ($artifacts.artifacts[$artifacts.artifacts.Count-1].workflow_run.id -ne $buildOutputArtifacts[0].workflow_run.id) {
+                break
             }
         }
-    } while (!$allArtifactsFound -and $artifacts.total_count -gt $page*$per_page)
-    $result
+        if ($total_count -le $page_no*$per_page) {
+            # no more pages
+            break
+        }
+        $page_no += 1
+    }
+    if ($buildOutputArtifacts.Count -eq 0) {
+        Write-Host "No matching buildOutput artifacts found"
+        return
+    }
+    Write-Host "Matching artifacts:"
+    # We have all matching artifacts from the workflow run (and maybe more runs)
+    # Now we need to filter out the artifacts that match the projects we need
+    $result = $matchingArtifacts | Where-Object { $_.workflow_run.id -eq $buildOutputArtifacts[0].workflow_run.id } | ForEach-Object {
+        foreach($project in $projects.Split(',')) {
+            $project = $project.Replace('\','_').Replace('/','_')
+            $artifactPattern = "$project-$branch-$mask-$version"
+            if ($_.name -like $artifactPattern) {
+                Write-Host "- $($_.name)"
+                return $_
+            }
+        }
+    }
+    if (-not $result) {
+        Write-Host "- No matching artifacts found"
+    }
 }
 
 function DownloadArtifact {
@@ -720,10 +802,7 @@ function DownloadArtifact {
     if ([string]::IsNullOrEmpty($token)) {
         $token = invoke-gh -silent -returnValue auth token
     }
-    $headers = @{ 
-        "Authorization" = "token $token"
-        "Accept"        = "application/vnd.github.v3+json"
-    }
+    $headers = GetHeader -token $token
     $outFile = Join-Path $path "$($artifact.Name).zip"
     InvokeWebRequest -Headers $headers -Uri $artifact.archive_download_url -OutFile $outFile
     $outFile
