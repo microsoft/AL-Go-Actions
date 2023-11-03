@@ -412,7 +412,6 @@ try {
         -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
         -generateDependencyArtifact:$settings.generateDependencyArtifact `
         -updateDependencies:$settings.updateDependencies `
-        -previousApps $previousApps `
         -appFolders $settings.appFolders `
         -testFolders $settings.testFolders `
         -bcptTestFolders $settings.bcptTestFolders `
@@ -461,7 +460,6 @@ try {
         -baseFolder $projectPath `
         -sharedFolder $sharedFolder `
         -licenseFile $licenseFileUrl `
-        -previousApps $previousApps `
         -installTestApps $installTestApps `
         -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
         -appFolders $settings.appFolders `
