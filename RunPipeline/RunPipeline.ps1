@@ -440,7 +440,7 @@ try {
     $CreateTranslationScriptPath = (Join-Path -Path $PSScriptRoot -ChildPath "..\CreateXLIFFTranslationFile\GenerateTranslationXLIFF.js" -Resolve)
     Write-Host "Translation script path: $CreateTranslationScriptPath"
     Write-Host "Generating Translated XLIFF files"
-    & 'C:\Program Files\nodejs\node.exe' $CreateTranslationScriptPath $projectPath
+    node $CreateTranslationScriptPath $projectPath
 
     Write-Host "Invoke Run-AlPipeline with buildmode $buildMode"
     Run-AlPipeline @runAlPipelineParams `
