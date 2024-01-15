@@ -390,7 +390,7 @@ try {
     # Create docker credential
     $pipelineDockerCredential = (New-Object pscredential 'admin', (ConvertTo-SecureString -String (Get-RandomPassword -PasswordLength 16) -AsPlainText -Force))
 
-    Write-Host "First: Run-AlPipeline with buildmode $buildMode"
+    Write-Host "::group::First compilation: Run-AlPipeline with buildmode $buildMode"
     Run-AlPipeline @runAlPipelineParams `
         -accept_insiderEula `
         -pipelinename $workflowName `
@@ -398,26 +398,22 @@ try {
         -imageName $imageName `
         -bcAuthContext $authContext `
         -environment $environmentName `
-        # -artifact $settings.artifact.replace('{INSIDERSASTOKEN}', '') `
+        -artifact $settings.artifact.replace('{INSIDERSASTOKEN}', '') `
         -vsixFile $settings.vsixFile `
         -companyName $settings.companyName `
         -memoryLimit $settings.memoryLimit `
         -baseFolder $projectPath `
         -sharedFolder $sharedFolder `
         -licenseFile $licenseFileUrl `
-        # -installApps $installApps `
-        # -installTestApps $installTestApps `
-        # -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
-        # -generateDependencyArtifact:$settings.generateDependencyArtifact `
-        # -updateDependencies:$settings.updateDependencies `
-        # -previousApps $previousApps `
-        # -appFolders $settings.appFolders `
-        # -testFolders $settings.testFolders `
-        # -bcptTestFolders $settings.bcptTestFolders `
+        -updateDependencies:$settings.updateDependencies `
+        -previousApps $previousApps `
+        -appFolders $settings.appFolders `
+        -testFolders $settings.testFolders `
+        -bcptTestFolders $settings.bcptTestFolders `
         -buildOutputFile $buildOutputFile `
         -containerEventLogFile $containerEventLogFile `
-        # -testResultsFile $testResultsFile `
-        # -testResultsFormat 'JUnit' `
+        -testResultsFile $testResultsFile `
+        -testResultsFormat 'JUnit' `
         -customCodeCops $settings.customCodeCops `
         -gitHubActions `
         -failOn $settings.failOn `
@@ -427,56 +423,20 @@ try {
         -appSourceCopMandatoryAffixes $settings.appSourceCopMandatoryAffixes `
         -additionalCountries $additionalCountries `
         -obsoleteTagMinAllowedMajorMinor $settings.obsoleteTagMinAllowedMajorMinor `
-        # -buildArtifactFolder $buildArtifactFolder `
-        # -CreateRuntimePackages:$CreateRuntimePackages `
+        -CreateRuntimePackages:$CreateRuntimePackages `
         -appBuild $appBuild -appRevision $appRevision `
         -uninstallRemovedApps `
         -credential $pipelineDockerCredential `
         -keepContainer `
-        -PublishBcContainerApp { Write-Host "Publish override" }
+        -PublishBcContainerApp { Write-Host "Publish override" } 
+    # -installApps $installApps `
+    # -installTestApps $installTestApps `
+    # -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
+    # -generateDependencyArtifact:$settings.generateDependencyArtifact `
+    # -buildArtifactFolder $buildArtifactFolder `
+    Write-Host "::endgroup::"
 
-    # Compile first time to generate en-US xliff
-    # Write-Host "Invoke Run-AlPipeline for original XLIFF generation"
-    # Run-AlPipeline @runAlPipelineParams `
-    #     -accept_insiderEula `
-    #     -pipelinename $workflowName `
-    #     -containerName $containerName `
-    #     -credential $pipelineDockerCredential `
-    #     -imageName $imageName `
-    #     -bcAuthContext $authContext `
-    #     -environment $environmentName `
-    #     -artifact $settings.artifact.replace('{INSIDERSASTOKEN}', '') `
-    #     -vsixFile $settings.vsixFile `
-    #     -companyName $settings.companyName `
-    #     -memoryLimit $settings.memoryLimit `
-    #     -baseFolder $projectPath `
-    #     -sharedFolder $sharedFolder `
-    #     -installApps $installApps `
-    #     -installTestApps $installTestApps `
-    #     -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
-    #     -generateDependencyArtifact:$settings.generateDependencyArtifact `
-    #     -updateDependencies:$settings.updateDependencies `
-    #     -appFolders $settings.appFolders `
-    #     -testFolders $settings.testFolders `
-    #     -bcptTestFolders $settings.bcptTestFolders `
-    #     -buildOutputFile $buildOutputFile `
-    #     -containerEventLogFile $containerEventLogFile `
-    #     -testResultsFile $testResultsFile `
-    #     -testResultsFormat 'JUnit' `
-    #     -customCodeCops $settings.customCodeCops `
-    #     -gitHubActions `
-    #     -failOn $settings.failOn `
-    #     -treatTestFailuresAsWarnings:$settings.treatTestFailuresAsWarnings `
-    #     -rulesetFile $settings.rulesetFile `
-    #     -enableExternalRulesets:$settings.enableExternalRulesets `
-    #     -appSourceCopMandatoryAffixes $settings.appSourceCopMandatoryAffixes `
-    #     -additionalCountries $additionalCountries `
-    #     -obsoleteTagMinAllowedMajorMinor $settings.obsoleteTagMinAllowedMajorMinor `
-    #     -appBuild $appBuild -appRevision $appRevision `
-    #     -uninstallRemovedApps `
-    #     -keepContainer `
-    #     -PublishBcContainerApp { Write-Host "Publish override" }
-
+    Write-Host "::group::Generating XLIFF translated files"
     Write-Host "Script path: $PSScriptRoot"
     Write-Host "Project path: $projectPath"
     # Generate translated XLIFF files
@@ -484,47 +444,9 @@ try {
     Write-Host "Translation script path: $CreateTranslationScriptPath"
     Write-Host "Generating Translated XLIFF files"
     & 'C:\Program Files\nodejs\node.exe' $CreateTranslationScriptPath $projectPath
+    Write-Host "::endgroup::"
 
-    # Write-Host "Invoke Run-AlPipeline with buildmode $buildMode"
-    # Run-AlPipeline @runAlPipelineParams `
-    #     -accept_insiderEula `
-    #     -pipelinename $workflowName `
-    #     -containerName $containerName `
-    #     -credential $pipelineDockerCredential `
-    #     -reUseContainer `
-    #     -imageName $imageName `
-    #     -bcAuthContext $authContext `
-    #     -environment $environmentName `
-    #     -artifact $settings.artifact.replace('{INSIDERSASTOKEN}', '') `
-    #     -vsixFile $settings.vsixFile `
-    #     -companyName $settings.companyName `
-    #     -memoryLimit $settings.memoryLimit `
-    #     -baseFolder $projectPath `
-    #     -sharedFolder $sharedFolder `
-    #     -installTestApps $installTestApps `
-    #     -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
-    #     -appFolders $settings.appFolders `
-    #     -testFolders $settings.testFolders `
-    #     -bcptTestFolders $settings.bcptTestFolders `
-    #     -buildOutputFile $buildOutputFile `
-    #     -containerEventLogFile $containerEventLogFile `
-    #     -testResultsFile $testResultsFile `
-    #     -testResultsFormat 'JUnit' `
-    #     -customCodeCops $settings.customCodeCops `
-    #     -gitHubActions `
-    #     -failOn $settings.failOn `
-    #     -treatTestFailuresAsWarnings:$settings.treatTestFailuresAsWarnings `
-    #     -rulesetFile $settings.rulesetFile `
-    #     -enableExternalRulesets:$settings.enableExternalRulesets `
-    #     -appSourceCopMandatoryAffixes $settings.appSourceCopMandatoryAffixes `
-    #     -additionalCountries $additionalCountries `
-    #     -obsoleteTagMinAllowedMajorMinor $settings.obsoleteTagMinAllowedMajorMinor `
-    #     -buildArtifactFolder $buildArtifactFolder `
-    #     -CreateRuntimePackages:$CreateRuntimePackages `
-    #     -appBuild $appBuild -appRevision $appRevision `
-    #     -uninstallRemovedApps
-
-    Write-Host "Second: Invoke Run-AlPipeline with buildmode $buildMode"
+    Write-Host "::group::Second compilation: Run-AlPipeline with buildmode $buildMode"
     Run-AlPipeline @runAlPipelineParams `
         -accept_insiderEula `
         -pipelinename $workflowName `
@@ -566,6 +488,8 @@ try {
         -appBuild $appBuild -appRevision $appRevision `
         -uninstallRemovedApps `
         -credential $pipelineDockerCredential `
+        -reUseContainer
+    Write-Host "::endgroup::"
 
     if ($containerBaseFolder) {
 
