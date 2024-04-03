@@ -521,6 +521,11 @@ function ReadSettings {
         [string] $repoSettingsVariableValue = "$ENV:ALGoRepoSettings"
     )
 
+    # If the build is triggered by a pull request the refname will be the merge branch. To apply conditional settings we need to use the base branch
+    if (($env:GITHUB_EVENT_NAME -eq "pull_request") -and ($branchName -eq $ENV:GITHUB_REF_NAME)) {
+        $branchName = $env:GITHUB_BASE_REF
+    }
+
     function GetSettingsObject {
         Param(
             [string] $path
@@ -2261,7 +2266,7 @@ function RetryCommand {
         catch {
             $retryCount++
             if ($retryCount -eq $MaxRetries) {
-                throw $_
+                throw
             }
             else {
                 Write-Host "Retrying after $RetryDelaySeconds seconds..."
@@ -2300,4 +2305,16 @@ function GetProjectsFromRepository {
         }
     }
     return $projects
+}
+
+function Get-PackageVersion($PackageName) {
+    $alGoPackages = Get-Content -Path "$PSScriptRoot\Packages.json" | ConvertFrom-Json
+
+    # Check if the package is in the list of packages
+    if ($alGoPackages.PSobject.Properties.name -match $PackageName) {
+        return $alGoPackages.$PackageName
+    }
+    else {
+        throw "Package $PackageName is not in the list of packages"
+    }
 }
