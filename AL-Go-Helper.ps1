@@ -293,14 +293,13 @@ function DownloadAndImportBcContainerHelper {
                 $webclient.DownloadFile("https://bccontainerhelper.blob.core.windows.net/public/$($bcContainerHelperVersion).zip", "$tempName.zip")
             }
         }
-        elseif ($bcContainerHelperVersion -eq "preview" -or $bcContainerHelperVersion -eq "dev") {
-            # For backwards compatibility, use preview when dev is specified
-            Write-Host "Downloading BcContainerHelper $bcContainerHelperVersion version from Blob Storage"
-            $webclient.DownloadFile("https://bccontainerhelper.blob.core.windows.net/public/preview.zip", "$tempName.zip")
-        }
         else {
-            Write-Host "Downloading BcContainerHelper $bcContainerHelperVersion version from CDN"
-            $webclient.DownloadFile("https://bccontainerhelper.azureedge.net/public/$($bcContainerHelperVersion).zip", "$tempName.zip")
+            if ($bcContainerHelperVersion -eq "dev") {
+                # For backwards compatibility, use preview when dev is specified
+                $bcContainerHelperVersion = 'preview'
+            }
+            Write-Host "Downloading BcContainerHelper $bcContainerHelperVersion version from Blob Storage"
+            $webclient.DownloadFile("https://bccontainerhelper.blob.core.windows.net/public/$($bcContainerHelperVersion).zip", "$tempName.zip")
         }
         Expand-7zipArchive -Path "$tempName.zip" -DestinationPath $tempName
         $BcContainerHelperPath = (Get-Item -Path (Join-Path $tempName "*\BcContainerHelper.ps1")).FullName
