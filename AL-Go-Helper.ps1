@@ -240,14 +240,13 @@ function DownloadAndImportBcContainerHelper {
     else {
         $tempName = Join-Path $env:TEMP ([Guid]::NewGuid().ToString())
         $webclient = New-Object System.Net.WebClient
-        if ($BcContainerHelperVersion -eq "dev") {
-            Write-Host "Downloading BcContainerHelper developer version"
-            $webclient.DownloadFile("https://github.com/microsoft/navcontainerhelper/archive/dev.zip", "$tempName.zip")
+        if ($bcContainerHelperVersion -eq "dev") {
+            # For backwards compatibility, use preview when dev is specified
+            $bcContainerHelperVersion = 'preview'
         }
-        else {
-            Write-Host "Downloading BcContainerHelper $BcContainerHelperVersion version from Blob Storage"
-            $webclient.DownloadFile("https://bccontainerhelper.blob.core.windows.net/public/$($BcContainerHelperVersion).zip", "$tempName.zip")        
-        }
+        Write-Host "Downloading BcContainerHelper $bcContainerHelperVersion version from Blob Storage"
+        $webclient.DownloadFile("https://bccontainerhelper.blob.core.windows.net/public/$($bcContainerHelperVersion).zip", "$tempName.zip")
+
         Expand-7zipArchive -Path "$tempName.zip" -DestinationPath $tempName
         $BcContainerHelperPath = (Get-Item -Path (Join-Path $tempName "*\BcContainerHelper.ps1")).FullName
         Remove-Item -Path "$tempName.zip" -ErrorAction SilentlyContinue
