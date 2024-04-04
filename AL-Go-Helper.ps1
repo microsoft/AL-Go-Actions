@@ -244,13 +244,9 @@ function DownloadAndImportBcContainerHelper {
             Write-Host "Downloading BcContainerHelper developer version"
             $webclient.DownloadFile("https://github.com/microsoft/navcontainerhelper/archive/dev.zip", "$tempName.zip")
         }
-        elseif ($BcContainerHelperVersion -eq "latest") {
+        else {
             Write-Host "Downloading BcContainerHelper $BcContainerHelperVersion version from Blob Storage"
             $webclient.DownloadFile("https://bccontainerhelper.blob.core.windows.net/public/$($BcContainerHelperVersion).zip", "$tempName.zip")        
-        }
-        else {
-            Write-Host "Downloading BcContainerHelper $BcContainerHelperVersion version from CDN"
-            $webclient.DownloadFile("https://bccontainerhelper.azureedge.net/public/$($BcContainerHelperVersion).zip", "$tempName.zip")
         }
         Expand-7zipArchive -Path "$tempName.zip" -DestinationPath $tempName
         $BcContainerHelperPath = (Get-Item -Path (Join-Path $tempName "*\BcContainerHelper.ps1")).FullName
