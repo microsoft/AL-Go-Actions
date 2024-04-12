@@ -1803,6 +1803,7 @@ function CreateDevEnv {
                     "artifact"   = $settings.artifact.replace('{INSIDERSASTOKEN}', '')
                     "auth"       = $auth
                     "credential" = $credential
+                    "keepContainer" = $true
                 }
                 if ($containerName) {
                     $runAlPipelineParams += @{
@@ -1921,8 +1922,7 @@ function CreateDevEnv {
                 -obsoleteTagMinAllowedMajorMinor $settings.obsoleteTagMinAllowedMajorMinor `
                 -doNotRunTests `
                 -doNotRunBcptTests `
-                -useDevEndpoint `
-                -keepContainer
+                -useDevEndpoint
         }
         finally {
             Pop-Location
@@ -2190,7 +2190,7 @@ function DetermineArtifactUrl {
 
     if ($artifact -like "https://*") {
         $artifactUrl = $artifact
-        $storageAccount = ("$artifactUrl////".Split('/')[2]).Split('.')[0]
+        $storageAccount = ("$artifactUrl////".Split('/')[2])
         $artifactType = ("$artifactUrl////".Split('/')[3])
         $version = ("$artifactUrl////".Split('/')[4])
         $country = ("$artifactUrl////".Split('?')[0].Split('/')[5])
