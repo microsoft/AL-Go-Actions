@@ -18,7 +18,7 @@ $defaultCICDPushBranches = @( 'main', 'release/*', 'feature/*' )
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'defaultCICDPullRequestBranches', Justification = 'False positive.')]
 $defaultCICDPullRequestBranches = @( 'main' )
 $runningLocal = $local.IsPresent
-$defaultBcContainerHelperVersion = "latest" # Must be double quotes. Will be replaced by BcContainerHelperVersion if necessary in the deploy step
+$defaultBcContainerHelperVersion = "latest" # Must be double quotes. Will be replaced by BcContainerHelperVersion if necessary in the deploy step - ex. "https://github.com/organization/navcontainerhelper/archive/refs/heads/branch.zip"
 $microsoftTelemetryConnectionString = "InstrumentationKey=84bd9223-67d4-4378-8590-9e4a46023be2;IngestionEndpoint=https://westeurope-1.in.applicationinsights.azure.com/"
 $notSecretProperties = @("Scopes","TenantId","BlobName","ContainerName","StorageAccountName","ServerUrl")
 
@@ -400,6 +400,9 @@ function DownloadAndImportBcContainerHelper([string] $baseFolder = $ENV:GITHUB_W
             if ($bcContainerHelperVersion -like "https://*") {
                 throw "Setting BcContainerHelperVersion to a URL in settings is not allowed. Fork the AL-Go repository and use direct AL-Go development instead."
             }
+            if ($bcContainerHelperVersion -ne 'latest' -and $bcContainerHelperVersion -ne 'preview') {
+                Write-Host "::Warning::Using a specific version of BcContainerHelper is not recommended and will lead to build failures in the future. Consider removing the setting."
+            }
         }
         $params += @{ "bcContainerHelperConfigFile" = $repoSettingsPath }
     }
@@ -410,10 +413,6 @@ function DownloadAndImportBcContainerHelper([string] $baseFolder = $ENV:GITHUB_W
 
     if ($bcContainerHelperVersion -eq 'private') {
         throw "ContainerHelperVersion private is no longer supported. Use direct AL-Go development and a direct download url instead."
-    }
-
-    if ($bcContainerHelperVersion -ne 'latest' -and $bcContainerHelperVersion -ne 'preview') {
-        Write-Host "::Warning::Using a specific version of BcContainerHelper is not recommended and will lead to build failures in the future. Consider removing the setting."
     }
 
     $bcContainerHelperPath = GetBcContainerHelperPath -bcContainerHelperVersion $bcContainerHelperVersion
@@ -611,6 +610,12 @@ function ReadSettings {
         "doNotSignApps"                                 = $false
         "configPackages"                                = @()
         "appSourceCopMandatoryAffixes"                  = @()
+        "deliverToAppSource"                            = [ordered]@{
+            "mainAppFolder"                             = ""
+            "productId"                                 = ""
+            "includeDependencies"                       = @()
+            "continuousDelivery"                        = $false
+        }
         "obsoleteTagMinAllowedMajorMinor"               = ""
         "memoryLimit"                                   = ""
         "templateUrl"                                   = ""
@@ -638,7 +643,7 @@ function ReadSettings {
             "continuousDeployment"                      = $false
             "deployToGitHubPages"                       = $true
             "maxReleases"                               = 3
-            "groupByProject"                      = $true
+            "groupByProject"                            = $true
             "includeProjects"                           = @()
             "excludeProjects"                           = @()
             "header"                                    = "Documentation for {REPOSITORY} {VERSION}"
@@ -1515,7 +1520,7 @@ function OptionallyConvertFromBase64 {
 }
 
 function GetContainerName([string] $project) {
-    "bc$($project -replace "\W")$env:GITHUB_RUN_ID"
+    "bc$($project -replace "[^a-z0-9\-]")$env:GITHUB_RUN_ID"
 }
 
 function CreateDevEnv {
@@ -1548,7 +1553,8 @@ function CreateDevEnv {
         [Parameter(ParameterSetName = 'local')]
         [string] $containerName = "",
         [string] $licenseFileUrl = "",
-        [switch] $accept_insiderEula
+        [switch] $accept_insiderEula,
+        [switch] $clean
     )
 
     if ($PSCmdlet.ParameterSetName -ne $kind) {
@@ -1697,7 +1703,7 @@ function CreateDevEnv {
         $settings = AnalyzeRepo -settings $settings -baseFolder $baseFolder -project $project @params
         $settings = CheckAppDependencyProbingPaths -settings $settings -baseFolder $baseFolder -repository $repository -project $project
 
-        if (!$accept_insiderEula -and ($settings.artifact -like 'https://bcinsider.blob.core.windows.net/*' -or $settings.artifact -like 'https://bcinsider.azureedge.net/*')) {
+        if (!$accept_insiderEula -and ($settings.artifact -like 'https://bcinsider*.net/*')) {
             Read-Host 'Press ENTER to accept the Business Central insider EULA (https://go.microsoft.com/fwlink/?linkid=2245051) or break the script to cancel'
             $accept_insiderEula = $true
         }
@@ -1706,10 +1712,13 @@ function CreateDevEnv {
             Write-Host "Repository is empty"
         }
 
-        if ($kind -eq "local" -and $settings.type -eq "AppSource App" ) {
-            if ($licenseFileUrl -eq "") {
-                OutputWarning -message "When building an AppSource App, you should create a secret called LicenseFileUrl, containing a secure URL to your license file with permission to the objects used in the app."
-            }
+        if ($clean) {
+            $appFolders = @()
+            $testFolders = @()
+        }
+        else {
+            $appFolders = $settings.appFolders
+            $testFolders = $settings.testFolders
         }
 
         $installApps = $settings.installApps
@@ -1800,9 +1809,10 @@ function CreateDevEnv {
 
             if ($kind -eq "local") {
                 $runAlPipelineParams += @{
-                    "artifact"   = $settings.artifact.replace('{INSIDERSASTOKEN}', '')
-                    "auth"       = $auth
-                    "credential" = $credential
+                    "artifact"      = $settings.artifact.replace('{INSIDERSASTOKEN}', '')
+                    "auth"          = $auth
+                    "credential"    = $credential
+                    "keepContainer" = $true
                 }
                 if ($containerName) {
                     $runAlPipelineParams += @{
@@ -1905,8 +1915,8 @@ function CreateDevEnv {
                 -installApps $installApps `
                 -installTestApps $installTestApps `
                 -installOnlyReferencedApps:$settings.installOnlyReferencedApps `
-                -appFolders $settings.appFolders `
-                -testFolders $settings.testFolders `
+                -appFolders $appFolders `
+                -testFolders $testFolders `
                 -testResultsFile $testResultsFile `
                 -testResultsFormat 'JUnit' `
                 -customCodeCops $settings.customCodeCops `
@@ -1921,8 +1931,7 @@ function CreateDevEnv {
                 -obsoleteTagMinAllowedMajorMinor $settings.obsoleteTagMinAllowedMajorMinor `
                 -doNotRunTests `
                 -doNotRunBcptTests `
-                -useDevEndpoint `
-                -keepContainer
+                -useDevEndpoint
         }
         finally {
             Pop-Location
@@ -2190,7 +2199,7 @@ function DetermineArtifactUrl {
 
     if ($artifact -like "https://*") {
         $artifactUrl = $artifact
-        $storageAccount = ("$artifactUrl////".Split('/')[2]).Split('.')[0]
+        $storageAccount = ("$artifactUrl////".Split('/')[2])
         $artifactType = ("$artifactUrl////".Split('/')[3])
         $version = ("$artifactUrl////".Split('/')[4])
         $country = ("$artifactUrl////".Split('?')[0].Split('/')[5])
@@ -2202,9 +2211,28 @@ function DetermineArtifactUrl {
         $version = $segments[2]
         $country = $segments[3]; if ($country -eq "") { $country = $projectSettings.country }
         $select = $segments[4]; if ($select -eq "") { $select = "latest" }
-        $artifactUrl = Get-BCArtifactUrl -storageAccount $storageAccount -type $artifactType -version $version -country $country -select $select -accept_insiderEula | Select-Object -First 1
-        if (-not $artifactUrl) {
-            throw "No artifacts found for the artifact setting ($artifact) in $ALGoSettingsFile"
+        if ($version -eq '*') {
+            $version = "$(([Version]$projectSettings.applicationDependency).Major).$(([Version]$projectSettings.applicationDependency).Minor)"
+            $allArtifactUrls = @(Get-BCArtifactUrl -storageAccount $storageAccount -type $artifactType -version $version -country $country -select all -accept_insiderEula | Where-Object { [Version]$_.Split('/')[4] -ge [Version]$projectSettings.applicationDependency })
+            if ($select -eq 'latest') {
+                $artifactUrl = $allArtifactUrls | Select-Object -Last 1
+            }
+            elseif ($select -eq 'first') {
+                $artifactUrl = $allArtifactUrls | Select-Object -First 1
+            }
+            else {
+                throw "Invalid artifact setting ($artifact) in $ALGoSettingsFile. Version can only be '*' if select is first or latest."
+            }
+            Write-Host "Found $($allArtifactUrls.Count) artifacts for version $version matching application dependency $($projectSettings.applicationDependency), selecting $select."
+            if (-not $artifactUrl) {
+                throw "No artifacts found for the artifact setting ($artifact) in $ALGoSettingsFile, when application dependency is $($projectSettings.applicationDependency)"
+            }
+        }
+        else {
+            $artifactUrl = Get-BCArtifactUrl -storageAccount $storageAccount -type $artifactType -version $version -country $country -select $select -accept_insiderEula | Select-Object -First 1
+            if (-not $artifactUrl) {
+                throw "No artifacts found for the artifact setting ($artifact) in $ALGoSettingsFile"
+            }
         }
         $version = $artifactUrl.Split('/')[4]
         $storageAccount = $artifactUrl.Split('/')[2]
