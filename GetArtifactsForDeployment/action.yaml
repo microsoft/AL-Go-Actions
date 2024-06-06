@@ -1,4 +1,4 @@
-name: Deploy
+name: Get Artifacts for deployment
 author: Microsoft Corporation
 inputs:
   shell:
@@ -9,39 +9,25 @@ inputs:
     description: The GitHub token running the action
     required: false
     default: ${{ github.token }}
-  environmentName:
-    description: Name of environment to deploy to
+  artifactsVersion:
+    description: Artifacts version to download (current, prerelease, draft, latest or version number)
     required: true
   artifactsFolder:
-    description: Path to the downloaded artifacts to deploy
+    description: Folder in which the artifacts will be downloaded
     required: true
-  type:
-    description: Type of deployment (CD or Publish)
-    required: false
-    default: 'CD'
-  deploymentEnvironmentsJson:
-    description: The settings for all Deployment Environments
-    required: true
-outputs:
-  environmentUrl:
-    description: The URL of the deployed environment
-    value: ${{ steps.Deploy.outputs.environmentUrl }}
 runs:
   using: composite
   steps:
     - name: run
       shell: ${{ inputs.shell }}
-      id: Deploy
       env:
         _token: ${{ inputs.token }}
-        _environmentName: ${{ inputs.environmentName }}
+        _artifactsVersion: ${{ inputs.artifactsVersion }}
         _artifactsFolder: ${{ inputs.artifactsFolder }}
-        _type: ${{ inputs.type }}
-        _deploymentEnvironmentsJson: ${{ inputs.deploymentEnvironmentsJson }}
       run: |
         $errorActionPreference = "Stop"; $ProgressPreference = "SilentlyContinue"; Set-StrictMode -Version 2.0
         try {
-          ${{ github.action_path }}/Deploy.ps1 -token $ENV:_token -environmentName $ENV:_environmentName -artifactsFolder $ENV:_artifactsFolder -type $ENV:_type -deploymentEnvironmentsJson $ENV:_deploymentEnvironmentsJson
+          ${{ github.action_path }}/GetArtifactsForDeployment.ps1 -token $ENV:_token -artifactsVersion $ENV:_artifactsVersion -artifactsFolder $ENV:_artifactsFolder
         }
         catch {
           Write-Host "::ERROR::Unexpected error when running action. Error Message: $($_.Exception.Message.Replace("`r",'').Replace("`n",' ')), StackTrace: $($_.ScriptStackTrace.Replace("`r",'').Replace("`n",' <- '))";
