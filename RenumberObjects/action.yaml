@@ -1,0 +1,26 @@
+name: PowerShell script
+author: Edu Martinez
+inputs:
+  projectPath:
+    description: The file path of the project in the GitHub repository
+    required: true
+    default: ${{ github.workspace }}
+runs:
+  using: composite
+  steps:
+    - name: Run PowerShell Script
+      shell: ${{ inputs.shell }}
+      env:
+        PROJECT_PATH: ${{ inputs.projectPath }}
+      run: |
+        $errorActionPreference = "Stop"; $ProgressPreference = "SilentlyContinue"; Set-StrictMode -Version 2.0
+        try {
+          & "${{ github.action_path }}/RunRenumberObjectsJs.ps1" -ProjectPath $ENV:PROJECT_PATH
+        }
+        catch {
+          Write-Host "::ERROR::Unexpected error when running action. Error Message: $($_.Exception.Message.Replace("`r",'').Replace("`n",' ')), StackTrace: $($_.ScriptStackTrace.Replace("`r",'').Replace("`n",' <- '))";
+          exit 1
+        }
+branding:
+  icon: code
+  color: green
