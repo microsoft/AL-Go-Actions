@@ -1,4 +1,4 @@
-name: PowerShell script
+name: Calculate Artifact Names
 author: Microsoft Corporation
 inputs:
   shell:
@@ -16,15 +16,12 @@ inputs:
     required: false
     default: ''
 outputs:
-  ThisBuildAppsArtifactsName:
-    description: Artifact name for apps being built in the current workflow run
-    value: ${{ steps.calculateartifactnames.outputs.ThisBuildAppsArtifactsName }}
-  ThisBuildTestAppsArtifactsName:
-    description: Artifact name for test apps being built in the current workflow run
-    value: ${{ steps.calculateartifactnames.outputs.ThisBuildTestAppsArtifactsName }}
   AppsArtifactsName:
     description: Artifacts name for Apps
     value: ${{ steps.calculateartifactnames.outputs.AppsArtifactsName }}
+  PowerPlatformSolutionArtifactsName:
+    description: Artifacts name for PowerPlatform Solution
+    value: ${{ steps.calculateartifactnames.outputs.PowerPlatformSolutionArtifactsName }}
   DependenciesArtifactsName:
     description: Artifacts name for Dependencies
     value: ${{ steps.calculateartifactnames.outputs.DependenciesArtifactsName }}
@@ -37,6 +34,12 @@ outputs:
   BcptTestResultsArtifactsName:
     description: Artifacts name for BcptTestResults
     value: ${{ steps.calculateartifactnames.outputs.BcptTestResultsArtifactsName }}
+  PageScriptingTestResultsArtifactsName:
+    description: Artifacts name for PageScriptingTestResults
+    value: ${{ steps.calculateartifactnames.outputs.PageScriptingTestResultsArtifactsName }}
+  PageScriptingTestResultDetailsArtifactsName:
+    description: Artifacts name for PageScriptingTestResultDetails
+    value: ${{ steps.calculateartifactnames.outputs.PageScriptingTestResultDetailsArtifactsName }}
   BuildOutputArtifactsName:
     description: Artifacts name for BuildOutput
     value: ${{ steps.calculateartifactnames.outputs.BuildOutputArtifactsName }}
@@ -57,13 +60,8 @@ runs:
         _buildMode: ${{ inputs.buildMode }}
         _suffix: ${{ inputs.suffix }}
       run: |
-        $errorActionPreference = "Stop"; $ProgressPreference = "SilentlyContinue"; Set-StrictMode -Version 2.0
-        try {
+        ${{ github.action_path }}/../Invoke-AlGoAction.ps1 -ActionName "CalculateArtifactNames" -Action {
           ${{ github.action_path }}/CalculateArtifactNames.ps1 -project $ENV:_project -buildMode $ENV:_buildMode -suffix $ENV:_suffix
-        }
-        catch {
-          Write-Host "::ERROR::Unexpected error when running action. Error Message: $($_.Exception.Message.Replace("`r",'').Replace("`n",' ')), StackTrace: $($_.ScriptStackTrace.Replace("`r",'').Replace("`n",' <- '))";
-          exit 1
         }
 branding:
   icon: terminal

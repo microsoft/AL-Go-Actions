@@ -1,14 +1,11 @@
 Param(
     [Parameter(HelpMessage = "The GitHub token running the action", Mandatory = $false)]
     [string] $token,
-    [Parameter(HelpMessage = "Specifies the parent telemetry scope for the telemetry signal", Mandatory = $false)]
-    [string] $parentTelemetryScopeJson = '7b7d',
     [Parameter(HelpMessage = "ArtifactUrl to use for the build", Mandatory = $false)]
     [string] $artifact = "",
     [Parameter(HelpMessage = "Project folder", Mandatory = $false)]
     [string] $project = "",
     [Parameter(HelpMessage = "Specifies a mode to use for the build steps", Mandatory = $false)]
-    [ValidateSet('Default', 'Translated', 'Clean')]
     [string] $buildMode = 'Default',
     [Parameter(HelpMessage = "A JSON-formatted list of apps to install", Mandatory = $false)]
     [string] $installAppsJson = '[]',
@@ -42,10 +39,8 @@ $projectPath = $null
 
 try {
     . (Join-Path -Path $PSScriptRoot -ChildPath "..\AL-Go-Helper.ps1" -Resolve)
+    Import-Module (Join-Path $PSScriptRoot '..\TelemetryHelper.psm1' -Resolve)
     DownloadAndImportBcContainerHelper
-
-    import-module (Join-Path -path $PSScriptRoot -ChildPath "..\TelemetryHelper.psm1" -Resolve)
-    $telemetryScope = CreateScope -eventId 'DO0080' -parentTelemetryScopeJson $parentTelemetryScopeJson
 
     if ($isWindows) {
         # Pull docker image in the background
@@ -121,12 +116,7 @@ try {
     }
 
     $analyzeRepoParams = @{}
-    # If UseCompilerFolder is set, set the parameter on Run-AlPipeline
-    if ($settings.useCompilerFolder) {
-        $runAlPipelineParams += @{
-            "useCompilerFolder" = $true
-        }
-    }
+
     if ($artifact) {
         # Avoid checking the artifact setting in AnalyzeRepo if we have an artifactUrl
         $settings.artifact = $artifact
@@ -150,10 +140,36 @@ try {
         exit
     }
 
-    if ($settings.type -eq "AppSource App" ) {
-        if ($licenseFileUrl -eq "") {
-            OutputWarning -message "When building an AppSource App, you should create a secret called LicenseFileUrl, containing a secure URL to your license file with permission to the objects used in the app."
+    if ($bcContainerHelperConfig.ContainsKey('TrustedNuGetFeeds')) {
+        Write-Host "Reading TrustedNuGetFeeds"
+        foreach($trustedNuGetFeed in $bcContainerHelperConfig.TrustedNuGetFeeds) {
+            if ($trustedNuGetFeed.PSObject.Properties.Name -eq 'Token') {
+                if ($trustedNuGetFeed.Token -ne '') {
+                    OutputWarning -message "Auth token for NuGet feed is defined in settings. This is not recommended. Use a secret instead and specify the secret name in the AuthTokenSecret property"
+                }
+            }
+            else {
+                $trustedNuGetFeed | Add-Member -MemberType NoteProperty -Name 'Token' -Value ''
+            }
+            if ($trustedNuGetFeed.PSObject.Properties.Name -eq 'AuthTokenSecret' -and $trustedNuGetFeed.AuthTokenSecret) {
+                $authTokenSecret = $trustedNuGetFeed.AuthTokenSecret
+                if ($secrets.Keys -notcontains $authTokenSecret) {
+                    OutputWarning -message "Secret $authTokenSecret needed for trusted NuGetFeeds cannot be found"
+                }
+                else {
+                    $trustedNuGetFeed.Token = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secrets."$authTokenSecret"))
+                }
+            }
         }
+    }
+    else {
+        $bcContainerHelperConfig.TrustedNuGetFeeds = @()
+    }
+    if ($settings.trustMicrosoftNuGetFeeds) {
+        $bcContainerHelperConfig.TrustedNuGetFeeds += @([PSCustomObject]@{
+            "url" = "https://dynamicssmb2.pkgs.visualstudio.com/DynamicsBCPublicFeeds/_packaging/AppSourceSymbols/nuget/v3/index.json"
+            "token" = ''
+        })
     }
 
     $installApps = $settings.installApps
@@ -261,6 +277,8 @@ try {
         $scriptPath = Join-Path $ALGoFolderName "$ScriptName.ps1"
         if (Test-Path -Path $scriptPath -Type Leaf) {
             Write-Host "Add override for $scriptName"
+            Trace-Information -Message "Using override for $scriptName"
+
             $runAlPipelineParams += @{
                 "$scriptName" = (Get-Command $scriptPath | Select-Object -ExpandProperty ScriptBlock)
             }
@@ -314,8 +332,13 @@ try {
         }
     }
 
-    if ($gitHubPackagesContext -and ($runAlPipelineParams.Keys -notcontains 'InstallMissingDependencies')) {
-        $gitHubPackagesCredential = $gitHubPackagesContext | ConvertFrom-Json
+    if ((($bcContainerHelperConfig.ContainsKey('TrustedNuGetFeeds') -and ($bcContainerHelperConfig.TrustedNuGetFeeds.Count -gt 0)) -or ($gitHubPackagesContext)) -and ($runAlPipelineParams.Keys -notcontains 'InstallMissingDependencies')) {
+        if ($githubPackagesContext) {
+            $gitHubPackagesCredential = $gitHubPackagesContext | ConvertFrom-Json
+        }
+        else {
+            $gitHubPackagesCredential = [PSCustomObject]@{ "serverUrl" = ''; "token" = '' }
+        }
         $runAlPipelineParams += @{
             "InstallMissingDependencies" = {
                 Param([Hashtable]$parameters)
@@ -326,9 +349,9 @@ try {
                     $version = [System.Version]$version.SubString(0, $version.Length - 4)
                     $publishParams = @{
                         "nuGetServerUrl" = $gitHubPackagesCredential.serverUrl
-                        "nuGetToken"     = $gitHubPackagesCredential.token
-                        "packageName"    = "AL-Go-$appId"
-                        "version"        = $version
+                        "nuGetToken" = $gitHubPackagesCredential.token
+                        "packageName" = $appId
+                        "version" = $version
                     }
                     if ($parameters.ContainsKey('CopyInstalledAppsToFolder')) {
                         $publishParams += @{
@@ -336,12 +359,11 @@ try {
                         }
                     }
                     if ($parameters.ContainsKey('containerName')) {
-                        Publish-BcNuGetPackageToContainer -containerName $parameters.containerName -tenant $parameters.tenant -skipVerification @publishParams
+                        Publish-BcNuGetPackageToContainer -containerName $parameters.containerName -tenant $parameters.tenant -skipVerification -appSymbolsFolder $parameters.appSymbolsFolder @publishParams -ErrorAction SilentlyContinue
                     }
                     else {
-                        Copy-BcNuGetPackageToFolder -appSymbolsFolder $parameters.appSymbolsFolder @publishParams
+                        Download-BcNuGetPackageToFolder -folder $parameters.appSymbolsFolder @publishParams | Out-Null
                     }
-
                 }
             }
         }
@@ -352,6 +374,7 @@ try {
     "doNotBuildTests",
     "doNotRunTests",
     "doNotRunBcptTests",
+    "doNotRunPageScriptingTests",
     "doNotPublishApps",
     "installTestRunner",
     "installTestFramework",
@@ -360,35 +383,41 @@ try {
     "enableCodeCop",
     "enableAppSourceCop",
     "enablePerTenantExtensionCop",
-    "enableUICop" | ForEach-Object {
+    "enableUICop",
+    "enableCodeAnalyzersOnTestApps",
+    "useCompilerFolder" | ForEach-Object {
         if ($settings."$_") { $runAlPipelineParams += @{ "$_" = $true } }
     }
 
-    switch ($buildMode) {
-        'Clean' {
-            $preprocessorsymbols = $settings.cleanModePreprocessorSymbols
-
-            if (!$preprocessorsymbols) {
-                throw "No cleanModePreprocessorSymbols defined in settings.json for this project. Please add the preprocessor symbols to use when building in clean mode or disable CLEAN mode."
-            }
-
-            if ($runAlPipelineParams.Keys -notcontains 'preprocessorsymbols') {
-                $runAlPipelineParams["preprocessorsymbols"] = @()
-            }
-
-            Write-Host "Adding Preprocessor symbols: $preprocessorsymbols"
-            $runAlPipelineParams["preprocessorsymbols"] += $preprocessorsymbols
+    if ($buildMode -eq 'Translated') {
+        if ($runAlPipelineParams.Keys -notcontains 'features') {
+            $runAlPipelineParams["features"] = @()
         }
-        'Translated' {
-            if ($runAlPipelineParams.Keys -notcontains 'features') {
-                $runAlPipelineParams["features"] = @()
-            }
-            $runAlPipelineParams["features"] += "translationfile"
-        }
+        Write-Host "Adding translationfile feature"
+        $runAlPipelineParams["features"] += "translationfile"
+    }
+
+    if ($runAlPipelineParams.Keys -notcontains 'preprocessorsymbols') {
+        $runAlPipelineParams["preprocessorsymbols"] = @()
+    }
+
+    # REMOVE AFTER April 1st 2025 --->
+    if ($buildMode -eq 'Clean' -and $settings.ContainsKey('cleanModePreprocessorSymbols')) {
+        Write-Host "Adding Preprocessor symbols : $($settings.cleanModePreprocessorSymbols -join ',')"
+        $runAlPipelineParams["preprocessorsymbols"] += $settings.cleanModePreprocessorSymbols
+        Trace-DeprecationWarning -Message "cleanModePreprocessorSymbols is deprecated" -DeprecationTag "cleanModePreprocessorSymbols"
+    }
+    # <--- REMOVE AFTER April 1st 2025
+
+    if ($settings.ContainsKey('preprocessorSymbols')) {
+        Write-Host "Adding Preprocessor symbols : $($settings.preprocessorSymbols -join ',')"
+        $runAlPipelineParams["preprocessorsymbols"] += $settings.preprocessorSymbols
     }
 
     # Create docker credential
     $pipelineDockerCredential = (New-Object pscredential 'admin', (ConvertTo-SecureString -String (Get-RandomPassword -PasswordLength 16) -AsPlainText -Force))
+
+
 
     Write-Host "::group::First compilation: Run-AlPipeline with buildmode $buildMode"
     Run-AlPipeline @runAlPipelineParams `
@@ -431,8 +460,7 @@ try {
         -appBuild $appBuild -appRevision $appRevision `
         -uninstallRemovedApps `
         -credential $pipelineDockerCredential `
-        -keepContainer 
-    # -buildArtifactFolder $buildArtifactFolder `
+        -keepContainer
     Write-Host "::endgroup::"
 
     Write-Host "::group::Generating XLIFF translated files"
@@ -464,6 +492,8 @@ try {
         -appFolders $settings.appFolders `
         -testFolders $settings.testFolders `
         -bcptTestFolders $settings.bcptTestFolders `
+        -pageScriptingTests $settings.pageScriptingTests `
+        -restoreDatabases $settings.restoreDatabases `
         -buildOutputFile $buildOutputFile `
         -containerEventLogFile $containerEventLogFile `
         -testResultsFile $testResultsFile `
@@ -478,6 +508,8 @@ try {
         -additionalCountries $additionalCountries `
         -obsoleteTagMinAllowedMajorMinor $settings.obsoleteTagMinAllowedMajorMinor `
         -buildArtifactFolder $buildArtifactFolder `
+        -pageScriptingTestResultsFile (Join-Path $buildArtifactFolder 'PageScriptingTestResults.xml') `
+        -pageScriptingTestResultsFolder (Join-Path $buildArtifactFolder 'PageScriptingTestResultDetails') `
         -CreateRuntimePackages:$CreateRuntimePackages `
         -appBuild $appBuild -appRevision $appRevision `
         -uninstallRemovedApps `
@@ -492,7 +524,6 @@ try {
     Write-Host "::endgroup::"
 
     if ($containerBaseFolder) {
-
         Write-Host "Copy artifacts and build output back from build container"
         $destFolder = Join-Path $ENV:GITHUB_WORKSPACE $project
         Copy-Item -Path (Join-Path $projectPath ".buildartifacts") -Destination $destFolder -Recurse -Force
@@ -502,13 +533,8 @@ try {
         Copy-Item -Path $buildOutputFile -Destination $destFolder -Force -ErrorAction SilentlyContinue
         Copy-Item -Path $containerEventLogFile -Destination $destFolder -Force -ErrorAction SilentlyContinue
     }
-
-    TrackTrace -telemetryScope $telemetryScope
 }
 catch {
-    if (Get-Module BcContainerHelper) {
-        TrackException -telemetryScope $telemetryScope -errorRecord $_
-    }
     throw
 }
 finally {
@@ -517,8 +543,11 @@ finally {
             Write-Host "Get Event Log from container"
             $eventlogFile = Get-BcContainerEventLog -containerName $containerName -doNotOpen
             Copy-Item -Path $eventLogFile -Destination $containerEventLogFile
-            $destFolder = Join-Path $ENV:GITHUB_WORKSPACE $project
-            Copy-Item -Path $containerEventLogFile -Destination $destFolder
+            if ($project) {
+                # Copy event log to project folder if multiproject
+                $destFolder = Join-Path $ENV:GITHUB_WORKSPACE $project
+                Copy-Item -Path $containerEventLogFile -Destination $destFolder
+            }
         }
     }
     catch {

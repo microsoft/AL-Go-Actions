@@ -1,7 +1,7 @@
 Param(
     [Parameter(HelpMessage = "All GitHub Secrets in compressed JSON format", Mandatory = $true)]
     [string] $gitHubSecrets = "",
-    [Parameter(HelpMessage = "Comma separated list of Secrets to get. Secrets preceded by an asterisk are returned encrypted", Mandatory = $true)]
+    [Parameter(HelpMessage = "Comma-separated list of Secrets to get. Secrets preceded by an asterisk are returned encrypted", Mandatory = $true)]
     [string] $getSecrets = "",
     [Parameter(HelpMessage = "Determines whether you want to use the GhTokenWorkflow secret for TokenForPush", Mandatory = $false)]
     [string] $useGhTokenWorkflowForPush = 'false'
@@ -27,7 +27,7 @@ try {
     $outSecrets = [ordered]@{}
     $settings = $env:Settings | ConvertFrom-Json | ConvertTo-HashTable
     $keyVaultCredentials = GetKeyVaultCredentials
-    $getAppDependencyProbingPathsSecrets = $false
+    $getAppDependencySecrets = $false
     $getTokenForPush = $false
     [System.Collections.ArrayList]$secretsCollection = @()
     foreach($secret in ($getSecrets.Split(',') | Select-Object -Unique)) {
@@ -37,9 +37,9 @@ try {
             # If we are using the ghTokenWorkflow for commits, we need to get ghTokenWorkflow secret
             $secret = 'ghTokenWorkflow'
         }
-        $secretNameProperty = "$($secret.TrimStart('*'))SecretName"
-        if ($secret -eq 'AppDependencyProbingPathsSecrets') {
-            $getAppDependencyProbingPathsSecrets = $true
+        $secretNameProperty = "$($secret.TrimStart('-*'))SecretName"
+        if ($secret -eq 'AppDependencySecrets') {
+            $getAppDependencySecrets = $true
         }
         else {
             $secretName = $secret
@@ -61,12 +61,19 @@ try {
         }
     }
 
-    # Loop through appDependencyProbingPaths and add secrets to the collection of secrets to get
-    if ($getAppDependencyProbingPathsSecrets -and $settings.Keys -contains 'appDependencyProbingPaths') {
-        foreach($appDependencyProbingPath in $settings.appDependencyProbingPaths) {
-            if ($appDependencyProbingPath.PsObject.Properties.name -eq "AuthTokenSecret") {
-                if ($secretsCollection -notcontains $appDependencyProbingPath.authTokenSecret) {
-                    $secretsCollection += $appDependencyProbingPath.authTokenSecret
+    if ($getAppDependencySecrets) {
+        # Loop through appDependencyProbingPaths and trustedNuGetFeeds and add secrets to the collection of secrets to get
+        $settingsCollection = @()
+        if ($settings.Keys -contains 'appDependencyProbingPaths') {
+            $settingsCollection += $settings.appDependencyProbingPaths
+        }
+        if ($settings.Keys -contains 'trustedNuGetFeeds') {
+            $settingsCollection += $settings.trustedNuGetFeeds
+        }
+        foreach($settingsItem in $settingsCollection) {
+            if ($settingsItem.PsObject.Properties.name -eq "AuthTokenSecret") {
+                if ($secretsCollection -notcontains $settingsItem.authTokenSecret) {
+                    $secretsCollection += $settingsItem.authTokenSecret
                 }
             }
         }
@@ -76,9 +83,11 @@ try {
     foreach($secret in @($secretsCollection)) {
         $secretSplit = $secret.Split('=')
         $secretsProperty = $secretSplit[0]
-        # Secret names preceded by an asterisk are returned encrypted (and base64 encoded)
-        $secretsPropertyName = $secretsProperty.TrimStart('*')
-        $encrypted = $secretsProperty.StartsWith('*')
+        # Secret names preceded by an asterisk are returned encrypted (and base64 encoded unless...)
+        # Secret names preceded by a minus are not base64 encoded
+        $secretsPropertyName = $secretsProperty.TrimStart('-*')
+        $encrypted = $secretsProperty.TrimStart('-').StartsWith('*')
+        $base64encoded = !($secretsProperty.TrimStart('*').StartsWith('-'))
         $secretName = $secretsPropertyName
         if ($secretSplit.Count -gt 1) {
             $secretName = $secretSplit[1]
@@ -94,20 +103,36 @@ try {
                     $json = @{}
                 }
                 if ($json.Keys.Count) {
-                    if ($secretValue.contains("`n")) {
-                        throw "JSON Secret $secretName contains line breaks. JSON Secrets should be compressed JSON (i.e. NOT contain any line breaks)."
-                    }
                     foreach($keyName in $json.Keys) {
-                        if (@("Scopes","TenantId","BlobName","ContainerName","StorageAccountName") -notcontains $keyName) {
-                            # Mask individual values (but not Scopes, TenantId, BlobName, ContainerName and StorageAccountName)
-                            MaskValue -key "$($secretName).$($keyName)" -value $json."$keyName"
+                        if ((IsPropertySecret -propertyName $keyName) -and ($json."$keyName" -isnot [boolean])) {
+                            # Mask individual values if property is secret
+                            MaskValue -key "$($secretName).$($keyName)" -value "$($json."$keyName")"
+                        }
+                    }
+                    if ($json.ContainsKey('clientID') -and !($json.ContainsKey('clientSecret') -or $json.ContainsKey('refreshToken'))) {
+                        try {
+                            Write-Host "Query federated token"
+                            $result = Invoke-RestMethod -Method GET -UseBasicParsing -Headers @{ "Authorization" = "bearer $ENV:ACTIONS_ID_TOKEN_REQUEST_TOKEN"; "Accept" = "application/vnd.github+json" } -Uri "$ENV:ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange"
+                            $json += @{ "clientAssertion" = $result.value }
+                            $secretValue = $json | ConvertTo-Json -Compress
+                            MaskValue -key "$secretName with federated token" -value $secretValue
+                        }
+                        catch {
+                            throw "$SecretName doesn't contain any ClientSecret and AL-Go is unable to acquire an ID_TOKEN. Error was $($_.Exception.Message)"
                         }
                     }
                 }
-                $base64value = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($secretValue))
-                $outSecrets += @{ "$secretsProperty" = $base64value }
+                if ($base64encoded) {
+                    Write-Host "Base64 encode secret"
+                    $secretValue = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($secretValue))
+                }
+                $outSecrets += @{ "$secretsPropertyName" = $secretValue }
                 Write-Host "$($secretsPropertyName) successfully read from secret $secretName"
                 $secretsCollection.Remove($secret)
+            }
+            elseif ($secretsPropertyName -eq 'gitSubmodulesToken') {
+                Write-Host "Using GitHub token for gitSubmodulesToken"
+                $outSecrets += @{ "$secretsPropertyName" = GetGithubSecret -SecretName 'github_token' }
             }
         }
     }
@@ -116,8 +141,9 @@ try {
         $unresolvedSecrets = ($secretsCollection | ForEach-Object {
             $secretSplit = @($_.Split('='))
             $secretsProperty = $secretSplit[0]
-            # Secret names preceded by an asterisk are returned encrypted (and base64 encoded)
-            $secretsPropertyName = $secretsProperty.TrimStart('*')
+            # Secret names preceded by an asterisk are returned encrypted (and base64 encoded unless...)
+            # Secret names preceded by a minus are not base64 encoded
+            $secretsPropertyName = $secretsProperty.TrimStart('-*')
             if ($secretSplit.Count -eq 1 -or ($secretSplit[1] -eq '')) {
                 $secretsPropertyName
             }
