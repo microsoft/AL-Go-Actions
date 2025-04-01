@@ -170,7 +170,7 @@ function GetDependencies {
                 }
             }
             $projects = $dependency.projects
-            $repository = ([uri]$dependency.repo).AbsolutePath.Replace(".git", "").TrimStart("/")
+            $repository = ([uri]$dependency.repo).AbsolutePath.Replace(".git", "").TrimStart("/").TrimEnd("/")
             if ($dependency.release_status -eq "latestBuild") {
                 $token = GetAccessToken -token $dependency.authTokenSecret -repository $repository -permissions @{"contents"="read";"metadata"="read"}
                 $artifacts = GetArtifacts -token $token -api_url $api_url -repository $repository -mask $mask -projects $projects -version $dependency.version -branch $dependency.branch -baselineWorkflowID $dependency.baselineWorkflowID
@@ -931,7 +931,9 @@ function GetArtifactsFromWorkflowRun {
         [Parameter(Mandatory = $true)]
         [string] $mask,
         [Parameter(Mandatory = $true)]
-        [string] $projects
+        [string] $projects,
+        [Parameter(Mandatory = $false)]
+        [ref] $expiredArtifacts
     )
 
     Write-Host "Getting artifacts for workflow run $workflowRun, mask $mask, projects $projects and version $version"
@@ -970,6 +972,9 @@ function GetArtifactsFromWorkflowRun {
 
                 if($artifact.expired) {
                     Write-Host "Artifact $($artifact.name) (ID: $($artifact.id)) expired on $($artifact.expired_at)"
+                    if ($expiredArtifacts) {
+                        $expiredArtifacts.value += $artifact
+                    }
                     continue
                 }
 
