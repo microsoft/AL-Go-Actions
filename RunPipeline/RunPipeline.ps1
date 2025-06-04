@@ -127,7 +127,6 @@ try {
     $buildArtifactFolder = Join-Path $projectPath ".buildartifacts"
     New-Item $buildArtifactFolder -ItemType Directory | Out-Null
 
-    $downloadedAppsByType = @()
     if ($baselineWorkflowSHA -and $baselineWorkflowRunId -ne '0' -and $settings.incrementalBuilds.mode -eq 'modifiedApps') {
         # Incremental builds are enabled and we are only building modified apps
         try {
@@ -142,7 +141,7 @@ try {
         if (!$buildAll) {
             Write-Host "Get unmodified apps from baseline workflow run"
             # Downloaded apps are placed in the build artifacts folder, which is detected by Run-AlPipeline, meaning only non-downloaded apps are built
-            $downloadedAppsByType = Get-UnmodifiedAppsFromBaselineWorkflowRun `
+            Get-UnmodifiedAppsFromBaselineWorkflowRun `
                 -token $token `
                 -settings $settings `
                 -baseFolder $baseFolder `
@@ -467,14 +466,6 @@ try {
         $runAlPipelineParams["preprocessorsymbols"] = @()
     }
 
-    # DEPRECATION: REMOVE AFTER April 1st 2025 --->
-    if ($buildMode -eq 'Clean' -and $settings.ContainsKey('cleanModePreprocessorSymbols')) {
-        Write-Host "Adding Preprocessor symbols : $($settings.cleanModePreprocessorSymbols -join ',')"
-        $runAlPipelineParams["preprocessorsymbols"] += $settings.cleanModePreprocessorSymbols
-        Trace-DeprecationWarning -Message "cleanModePreprocessorSymbols is deprecated" -DeprecationTag "cleanModePreprocessorSymbols"
-    }
-    # <--- REMOVE AFTER April 1st 2025
-
     if ($settings.ContainsKey('preprocessorSymbols')) {
         Write-Host "Adding Preprocessor symbols : $($settings.preprocessorSymbols -join ',')"
         $runAlPipelineParams["preprocessorsymbols"] += $settings.preprocessorSymbols
@@ -536,6 +527,16 @@ try {
         Copy-Item -Path $buildOutputFile -Destination $destFolder -Force -ErrorAction SilentlyContinue
         Copy-Item -Path $containerEventLogFile -Destination $destFolder -Force -ErrorAction SilentlyContinue
     }
+
+    # check for new warnings
+    Import-Module (Join-Path $PSScriptRoot ".\CheckForWarningsUtils.psm1" -Resolve) -DisableNameChecking
+
+    Test-ForNewWarnings -token $token `
+        -project $project `
+        -settings $settings `
+        -buildMode $buildMode `
+        -baselineWorkflowRunId $baselineWorkflowRunId `
+        -prBuildOutputFile $buildOutputFile
 }
 catch {
     throw
