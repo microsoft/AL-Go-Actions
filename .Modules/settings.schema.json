@@ -19,7 +19,7 @@
         "projects": {
             "type": "array",
             "items": {
-                "type": "object"
+                "type": "string"
             },
             "description": "An array of AL-Go projects. See https://aka.ms/ALGoSettings#projects"
         },
@@ -601,6 +601,11 @@
                 },
                 "pullRequestAutoMerge": {
                     "type": "boolean"
+                },
+                "pullRequestMergeMethod": {
+                    "type": "string",
+                    "enum": ["merge", "squash"],
+                    "default": "squash"
                 },
                 "pullRequestLabels": {
                     "type": "array",
