@@ -1,3 +1,5 @@
+Import-Module (Join-Path -Path $PSScriptRoot "DebugLogHelper.psm1")
+
 $ALGoFolderName = '.AL-Go'
 $ALGoSettingsFile = Join-Path '.AL-Go' 'settings.json'
 $RepoSettingsFile = Join-Path '.github' 'AL-Go-Settings.json'
@@ -10,11 +12,29 @@ function MergeCustomObjectIntoOrderedDictionary {
         [PSCustomObject] $src
     )
 
+    # If the src object contains property 'overwriteSettings' (list of settings), remove these settings from the dst object, so that they can be re-added with the new value later on
+    if ($src.PSObject.Properties.Name -contains "overwriteSettings") {
+        $src.overwriteSettings | ForEach-Object {
+            $prop = $_
+            if ($dst.Contains($prop) -and $src.PSObject.Properties.Name -contains $prop) {
+                # Remove the property from the destination object only if it also exists in the source object. The property will be re-added with the new value later on.
+                OutputDebug "Overwriting setting $prop"
+                $dst.Remove($prop)
+            }
+        }
+    }
+
     # Loop through all properties in the source object
     # If the property does not exist in the destination object, add it with the right type, but no value
     # Types supported: PSCustomObject, Object[] and simple types
     $src.PSObject.Properties.GetEnumerator() | ForEach-Object {
         $prop = $_.Name
+
+        # Skip overwriteSettings property as it's only used to remove settings from the destination object and is specific to the source object
+        if ($prop -eq "overwriteSettings") {
+            return
+        }
+
         $srcProp = $src."$prop"
         $srcPropType = $srcProp.GetType().Name
         if (-not $dst.Contains($prop)) {
@@ -133,6 +153,7 @@ function GetDefaultSettings
         "enableUICop"                                   = $false
         "enableCodeAnalyzersOnTestApps"                 = $false
         "customCodeCops"                                = @()
+        "trackALAlertsInGitHub"                         = $false
         "failOn"                                        = "error"
         "treatTestFailuresAsWarnings"                   = $false
         "rulesetFile"                                   = ""
@@ -261,8 +282,6 @@ function GetDefaultSettings
         The value of the current GitHub environment settings variable, based on workflow context. Default is $ENV:ALGoEnvSettings.
     .PARAMETER environmentName
         The value of the environment name, based on the workflow context. Default is $ENV:ALGoEnvName.
-    .PARAMETER silent
-        If specified, the function will not output any messages to the console.
 #>
 function ReadSettings {
     Param(
@@ -276,8 +295,7 @@ function ReadSettings {
         [string] $orgSettingsVariableValue = "$ENV:ALGoOrgSettings",
         [string] $repoSettingsVariableValue = "$ENV:ALGoRepoSettings",
         [string] $environmentSettingsVariableValue = "$ENV:ALGoEnvSettings",
-        [string] $environmentName = "$ENV:ALGoEnvName",
-        [switch] $silent
+        [string] $environmentName = "$ENV:ALGoEnvName"
     )
 
     # If the build is triggered by a pull request the refname will be the merge branch. To apply conditional settings we need to use the base branch
@@ -292,7 +310,6 @@ function ReadSettings {
 
         if (Test-Path $path) {
             try {
-                if (!$silent.IsPresent) { Write-Host "Applying settings from $path" }
                 $settings = Get-Content $path -Encoding UTF8 | ConvertFrom-Json
                 if ($settings) {
                     return $settings
@@ -302,15 +319,12 @@ function ReadSettings {
                 throw "Error reading $path. Error was $($_.Exception.Message).`n$($_.ScriptStackTrace)"
             }
         }
-        else {
-            if (!$silent.IsPresent) { Write-Host "No settings found in $path" }
-        }
         return $null
     }
 
     $repoName = $repoName.SubString("$repoName".LastIndexOf('/') + 1)
     $githubFolder = Join-Path $baseFolder ".github"
-    $workflowName = $workflowName.Trim().Split([System.IO.Path]::getInvalidFileNameChars()) -join ""
+    $workflowName = SanitizeWorkflowName -workflowName $workflowName
 
     # Start with default settings
     $settings = GetDefaultSettings -repoName $repoName
@@ -318,52 +332,93 @@ function ReadSettings {
     # Read settings from files and merge them into the settings object
 
     $settingsObjects = @()
+
     # Read settings from organization settings variable (parameter)
     if ($orgSettingsVariableValue) {
         $orgSettingsVariableObject = $orgSettingsVariableValue | ConvertFrom-Json
-        $settingsObjects += @($orgSettingsVariableObject)
+        $settingsObjects += @{
+            "Source" = "ALGoOrgSettings"
+            "Type" = "Variable"
+            "Settings" = $orgSettingsVariableObject
+        }
     }
 
     # Read settings from repository settings file
     $customTemplateRepoSettingsObject = GetSettingsObject -Path (Join-Path $baseFolder $CustomTemplateRepoSettingsFile)
-    $settingsObjects += @($customTemplateRepoSettingsObject)
+    $settingsObjects += @{
+        "Source" = "$CustomTemplateRepoSettingsFile"
+        "Type" = "File"
+        "Settings" = $customTemplateRepoSettingsObject
+    }
 
     # Read settings from repository settings file
     $repoSettingsObject = GetSettingsObject -Path (Join-Path $baseFolder $RepoSettingsFile)
-    $settingsObjects += @($repoSettingsObject)
+    $settingsObjects += @{
+        "Source" = "$RepoSettingsFile"
+        "Type" = "File"
+        "Settings" = $repoSettingsObject
+    }
 
     # Read settings from repository settings variable (parameter)
     if ($repoSettingsVariableValue) {
         $repoSettingsVariableObject = $repoSettingsVariableValue | ConvertFrom-Json
-        $settingsObjects += @($repoSettingsVariableObject)
+        $settingsObjects += @{
+            "Source" = "ALGoRepoSettings"
+            "Type" = "Variable"
+            "Settings" = $repoSettingsVariableObject
+        }
     }
 
     if ($project) {
-        # Read settings from repository settings file
         $customTemplateProjectSettingsObject = GetSettingsObject -Path (Join-Path $baseFolder $CustomTemplateProjectSettingsFile)
-        $settingsObjects += @($customTemplateProjectSettingsObject)
+        $settingsObjects += @{
+            "Source" = "$CustomTemplateProjectSettingsFile"
+            "Type" = "File"
+            "Settings" = $customTemplateProjectSettingsObject
+        }
+
         # Read settings from project settings file
         $projectFolder = Join-Path $baseFolder $project -Resolve
         $projectSettingsObject = GetSettingsObject -Path (Join-Path $projectFolder $ALGoSettingsFile)
-        $settingsObjects += @($projectSettingsObject)
+        $settingsObjects += @{
+            "Source" = "$(Join-Path $project $ALGoSettingsFile)"
+            "Type" = "File"
+            "Settings" = $projectSettingsObject
+        }
     }
 
     if ($workflowName) {
         # Read settings from workflow settings file
-        $workflowSettingsObject = GetSettingsObject -Path (Join-Path $gitHubFolder "$workflowName.settings.json")
-        $settingsObjects += @($workflowSettingsObject)
+        $workflowSettingsObject = GetSettingsObject -Path (Join-Path $githubFolder "$workflowName.settings.json")
+        $settingsObjects += @{
+            "Source" = "$(Join-Path ".github" "$workflowName.settings.json")"
+            "Type" = "File"
+            "Settings" = $workflowSettingsObject
+        }
+
         if ($project) {
             # Read settings from project workflow settings file
             $projectWorkflowSettingsObject = GetSettingsObject -Path (Join-Path $projectFolder "$ALGoFolderName/$workflowName.settings.json")
+            $settingsObjects += @{
+                "Source" = "$(Join-Path $project "$ALGoFolderName/$workflowName.settings.json")"
+                "Type" = "File"
+                "Settings" = $projectWorkflowSettingsObject
+            }
+
             # Read settings from user settings file
-            $userSettingsObject = GetSettingsObject -Path (Join-Path $projectFolder "$ALGoFolderName/$userName.settings.json")
-            $settingsObjects += @($projectWorkflowSettingsObject, $userSettingsObject)
+           $userSettingsObject = GetSettingsObject -Path (Join-Path $projectFolder "$ALGoFolderName/$userName.settings.json")
+            $settingsObjects += @{
+                "Source" = "$(Join-Path $project "$ALGoFolderName/$userName.settings.json")"
+                "Type" = "File"
+                "Settings" = $userSettingsObject
+            }
         }
     }
 
     if ($environmentSettingsVariableValue) {
         # Read settings from environment variable (parameter)
         $environmentVariableObject = $environmentSettingsVariableValue | ConvertFrom-Json
+
         # Warn user that 'DeployTo' setting needs to include environment name
         if ($environmentVariableObject.PSObject.Properties.Name -contains "DeployTo") {
             OutputWarning "The environment settings variable contains the property 'DeployTo'. Did you intend to use 'DeployTo$environmentName' instead? The 'DeployTo' property without a specific environment name is not supported."
@@ -376,11 +431,17 @@ function ReadSettings {
                 }
             }
         }
-        $settingsObjects += @($environmentVariableObject)
+        $settingsObjects += @{
+            "Source" = "ALGoEnvSettings for $environmentName"
+            "Type" = "Variable"
+            "Settings" = $environmentVariableObject
+        }
     }
 
-    foreach($settingsJson in $settingsObjects) {
+    foreach($settingsObject in $settingsObjects) {
+        $settingsJson = $settingsObject.Settings
         if ($settingsJson) {
+            OutputDebug "Applying settings from $($settingsObject.Source) ($($settingsObject.Type))"
             MergeCustomObjectIntoOrderedDictionary -dst $settings -src $settingsJson
             if ($settingsJson.PSObject.Properties.Name -eq "ConditionalSettings") {
                 foreach($conditionalSetting in $settingsJson.ConditionalSettings) {
@@ -391,17 +452,26 @@ function ReadSettings {
                             $propName = $_.Key
                             $propValue = $_.Value
                             if ($conditionMet -and $conditionalSetting.PSObject.Properties.Name -eq $propName) {
+
+                                # If the property name is workflows then we should sanitize the workflow name in the same way we sanitize the $workflowName variable
+                                if($propName -eq "workflows") {
+                                    $conditionalSetting."$propName" = $conditionalSetting."$propName" | ForEach-Object { SanitizeWorkflowName -workflowName $_ }
+                                }
+
                                 $conditionMet = $propValue -and $conditionMet -and ($conditionalSetting."$propName" | Where-Object { $propValue -like $_ })
                                 $conditions += @("$($propName): $propValue")
                             }
                         }
                         if ($conditionMet) {
-                            if (!$silent.IsPresent) { Write-Host "Applying conditional settings for $($conditions -join ", ")" }
+                            OutputDebug "Applying conditional settings for $($conditions -join ", ")"
                             MergeCustomObjectIntoOrderedDictionary -dst $settings -src $conditionalSetting.settings
                         }
                     }
                 }
             }
+        }
+        else {
+            OutputDebug "No settings found in $($settingsObject.Source) ($($settingsObject.Type))"
         }
     }
 
@@ -418,21 +488,26 @@ function ReadSettings {
     #
     if ($settings.shell -eq "") {
         if ($settings."runs-on" -like "*ubuntu-*") {
+            OutputDebug "Setting shell to pwsh for ubuntu"
             $settings.shell = "pwsh"
         }
         else {
+            OutputDebug "Setting shell to powershell for non-ubuntu"
             $settings.shell = "powershell"
         }
     }
     if ($settings.githubRunner -eq "") {
         if ($settings."runs-on" -like "*ubuntu-*") {
+            OutputDebug "Setting gitHubRunner to windows-latest for ubuntu"
             $settings.githubRunner = "windows-latest"
         }
         else {
+            OutputDebug "Setting gitHubRunner to runs-on value: $($settings."runs-on")"
             $settings.githubRunner = $settings."runs-on"
         }
     }
     if ($settings.githubRunnerShell -eq "") {
+        OutputDebug "Setting gitHubRunnerShell to shell value: $($settings.shell)"
         $settings.githubRunnerShell = $settings.shell
     }
 
@@ -445,11 +520,12 @@ function ReadSettings {
     }
 
     if (($settings.githubRunner -like "*ubuntu-*") -and ($settings.githubRunnerShell -eq "powershell")) {
-        if (!$silent.IsPresent) { Write-Host "Switching shell to pwsh for ubuntu" }
+        OutputDebug "Switching shell to pwsh for ubuntu"
         $settings.githubRunnerShell = "pwsh"
     }
 
     if($settings.projectName -eq '') {
+        OutputDebug "Setting projectName to default value: $project"
         $settings.projectName = $project # Default to project path as project name
     }
 
@@ -495,6 +571,21 @@ function ValidateSettings {
             OutputWarning "Settings are not valid. Error: $result"
         }
     }
+}
+
+<#
+    .SYNOPSIS
+        Sanitize a workflow name by removing invalid file name characters.
+    .PARAMETER workflowName
+        The workflow name to sanitize.
+    .OUTPUTS
+        The sanitized workflow name.
+#>
+function SanitizeWorkflowName {
+    Param(
+        [string] $workflowName
+    )
+    return $workflowName.Trim().Split([System.IO.Path]::getInvalidFileNameChars()) -join ""
 }
 
 Export-ModuleMember -Function ReadSettings
