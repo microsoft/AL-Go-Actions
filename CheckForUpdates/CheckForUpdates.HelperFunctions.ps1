@@ -25,7 +25,7 @@ function DownloadTemplateRepository {
     OutputDebug -message "Getting template repository ($templateRepository) with GITHUB_TOKEN"
     $headers = GetHeaders -token $env:GITHUB_TOKEN -repository $templateRepository
     try {
-        $response = Invoke-WebRequest -Headers $headers -Method Head -Uri $templateRepositoryUrl
+        $response = Invoke-WebRequest -UseBasicParsing -Headers $headers -Method Head -Uri $templateRepositoryUrl
         OutputDebug -message ($response | Format-List | Out-String)
     }
     catch {
@@ -169,6 +169,7 @@ function ModifyBuildWorkflows {
     $deliver = $yaml.Get('jobs:/Deliver:/')
     $deploy = $yaml.Get('jobs:/Deploy:/')
     $deployALDoc = $yaml.Get('jobs:/DeployALDoc:/')
+    $codeAnalysisUpload = $yaml.Get('jobs:/CodeAnalysisUpload:/')
     $postProcess = $yaml.Get('jobs:/PostProcess:/')
     if (!$build) {
         throw "No build job found in the workflow"
@@ -255,6 +256,9 @@ function ModifyBuildWorkflows {
     }
     if ($deployALDoc) {
         $postProcessNeeds += @('DeployALDoc')
+    }
+    if ($codeAnalysisUpload) {
+        $postProcessNeeds += @('CodeAnalysisUpload')
     }
     if ($postProcess) {
         $postProcess.Replace('needs:', "needs: [ $($postProcessNeeds -join ', ') ]")
