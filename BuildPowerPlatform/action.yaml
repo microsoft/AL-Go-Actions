@@ -35,7 +35,7 @@ runs:
   using: composite
   steps:
     - name: Install Power Platform Tools
-      uses: newvision365/template-AL-Go-powerplatform-actions/actions-install@v1
+      uses: newvision365/template-AL_Go_powerplatform_actions/actions-install@v1
 
     - name: Update Power Platform Files
       shell: ${{ inputs.shell }}
@@ -51,7 +51,7 @@ runs:
         }
 
     - name: Test Pack (Not real - just workaround for https://github.com/microsoft/powerplatform-vscode/issues/412)
-      uses: newvision365/template-AL-Go-powerplatform-actions/pack-solution@v1
+      uses: newvision365/template-AL_Go_powerplatform_actions/pack-solution@v1
       with:
         solution-file: forgetMe.zip
         solution-folder: ${{ inputs.solutionFolder }}
@@ -63,7 +63,7 @@ runs:
         Remove-Item -Path forgetMe.zip -Force
 
     - name: Pack Solution
-      uses: newvision365/template-AL-Go-powerplatform-actions/pack-solution@v1
+      uses: newvision365/template-AL_Go_powerplatform_actions/pack-solution@v1
       with:
         solution-file: ${{ inputs.outputFolder }}/${{ inputs.outputFileName }}.zip
         solution-folder: ${{ inputs.solutionFolder }}
