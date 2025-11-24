@@ -35,7 +35,7 @@ runs:
   using: composite
   steps:
     - name: Install Power Platform Tools
-      uses: microsoft/powerplatform-actions/actions-install@v1
+      uses: newvision365/template-AL-Go-powerplatform-actions/actions-install@v1
 
     - name: Set Actions Repo and Ref
       shell: ${{ inputs.shell }}
@@ -76,7 +76,7 @@ runs:
 
     - name: Export Solution (username)
       if: steps.ReadPowerPlatformSettings.outputs.ppUserName != ''
-      uses: microsoft/powerplatform-actions/export-solution@v1
+      uses: newvision365/template-AL-Go-powerplatform-actions/export-solution@v1
       with:
         user-name: ${{ steps.ReadPowerPlatformSettings.outputs.ppUserName }}
         password-secret: ${{ steps.ReadPowerPlatformSettings.outputs.ppPassword }}
@@ -86,7 +86,7 @@ runs:
 
     - name: Export Solution (application ID)
       if: steps.ReadPowerPlatformSettings.outputs.ppApplicationId != ''
-      uses: microsoft/powerplatform-actions/export-solution@v1
+      uses: newvision365/template-AL-Go-powerplatform-actions/export-solution@v1
       with:
         tenant-id: ${{ steps.ReadPowerPlatformSettings.outputs.ppTenantId }}
         app-id: ${{ steps.ReadPowerPlatformSettings.outputs.ppApplicationId }}
@@ -96,7 +96,7 @@ runs:
         solution-output-file: ${{ env.clonedRepoPath }}/${{ inputs.solutionFolder }}.zip
 
     - name: Unpack Solution
-      uses: microsoft/powerplatform-actions/unpack-solution@v1
+      uses: newvision365/template-AL-Go-powerplatform-actions/unpack-solution@v1
       with:
         solution-file: ${{ env.clonedRepoPath }}/${{ inputs.solutionFolder }}.zip
         solution-folder: ${{ env.clonedRepoPath }}/${{ inputs.solutionFolder }}
