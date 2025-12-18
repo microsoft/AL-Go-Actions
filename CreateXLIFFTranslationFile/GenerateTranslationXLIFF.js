@@ -7,8 +7,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const fs = require("fs");
 const xml2js = require("xml2js");
-const OLD_LANGUAGE_CODES = ["SVE", "RUS", "NLD", "NLB", "NOR", "ITA", "ITS", "ISL", "FRA", "FRS", "FRC", "FRB", "FIN", "ESM", "ESP", "ENU", "ENZ", "ENG", "ENC", "ENA", "DEU", "DES", "DEA", "DAN", "CSY"];
-const NEW_LANGUAGE_CODES = ["sv-SE", "ru-RU", "nl-NL", "nl-BE", "nb-NO", "it-IT", "it-CH", "is-IS", "fr-FR", "fr-CH", "fr-CA", "fr-BE", "fi-FI", "es-MX", "es-ES", "en-US", "en-NZ", "en-GB", "en-CA", "en-AU", "de-DE", "de-CH", "de-AT", "da-DK", "cs-CZ"];
+const OLD_LANGUAGE_CODES = ["ESP", "SVE", "RUS", "NLD", "NLB", "NOR", "ITA", "ITS", "ISL", "FRA", "FRS", "FRC", "FRB", "FIN", "ESM", "ENU", "ENZ", "ENG", "ENC", "ENA", "DEU", "DES", "DEA", "DAN", "CSY"];
+const NEW_LANGUAGE_CODES = ["es-ES", "sv-SE", "ru-RU", "nl-NL", "nl-BE", "nb-NO", "it-IT", "it-CH", "is-IS", "fr-FR", "fr-CH", "fr-CA", "fr-BE", "fi-FI", "es-MX", "en-US", "en-NZ", "en-GB", "en-CA", "en-AU", "de-DE", "de-CH", "de-AT", "da-DK", "cs-CZ"];
 const PROJECT_PATH = process.argv[2];
 let appJSON;
 let oldLanguageCodes = [];
@@ -53,59 +53,102 @@ function onXliffFileRead(err, data) {
  * @param result Result in JSON format
  */
 function onStringParsed(err, result) {
-    if (err) {
-        return;
-    }
+    if (err) return;
+
     oldLanguageCodes = getTargetLanguages(result);
+    console.log('Detected languages (OLD):', oldLanguageCodes);
+    oldLanguageCodes = oldLanguageCodes
+    .map(l => l.replace('%', '').trim().toUpperCase())
+    .filter(l => OLD_LANGUAGE_CODES.includes(l));
     newLanguageCodes = transformLanguageCodesOldToNew(oldLanguageCodes);
-    for (let i = 0; i < newLanguageCodes.length; i++) {
-        //Cloning the json object
+
+    // 🔁 UN ARCHIVO POR IDIOMA
+    for (let fileIndex = 0; fileIndex < newLanguageCodes.length; fileIndex++) {
+
+        const currentOldLanguageCode = oldLanguageCodes[fileIndex]
+            .replace('%', '')
+            .trim()
+            .toUpperCase();
+
+        const currentNewLanguageCode = newLanguageCodes[fileIndex];
+
+        // Clonar XML base
         let clonedResult = JSON.parse(JSON.stringify(result));
-        //Adding target language
-        clonedResult['xliff']['file'][0]['$']['target-language'] = newLanguageCodes[i];
-        //Adding translations
-        let transUnits = clonedResult['xliff']['file'][0]['body'][0]['group'][0]['trans-unit'];
+
+        // Set target language
+        clonedResult['xliff']['file'][0]['$']['target-language'] =
+            currentNewLanguageCode;
+
+        let transUnits =
+            clonedResult['xliff']['file'][0]['body'][0]['group'][0]['trans-unit'];
+
+        // 🔥 Limpiar targets antes de empezar
+        for (const unit of transUnits) {
+            delete unit['target'];
+        }
+        // Procesar trans-units
         for (let j = 0; j < transUnits.length; j++) {
+            let hasLanguage = false;
+            if (!transUnits[j]['note']) {
+                transUnits.splice(j, 1);
+                j--;
+                continue;
+            }
             for (const note of transUnits[j]['note']) {
-                //If the note is a translations comment and it has a translation
-                if (note['$']['from'] === 'Developer' && typeof note['_'] !== 'undefined') {
-                    //if the note has a translation comment in current language
-                    if (note['_'].indexOf(oldLanguageCodes[i]) > -1) {
-                        //let translations = note['_'].toString().split(',');
-                        //Split between not quoted commas
-                        let translations = note['_'].toString().split(/(,)(?=(?:[^"]|"[^"]*")*$)/);
-                        let noteLanguages = [];
-                        //Get the translation
-                        for (const translation of translations) {
-                            if (translation != ',') {
-                                const splittedTranslation = translation.split('=');
-                                const translationLanguage = splittedTranslation[0];
-                                let comment = splittedTranslation[1];
-                                //Remove quotes if they are the first and last characters
-                                comment = comment.replace(/^"(.*)"$/, '$1');
-                                //if the translation is in the current language, add it
-                                if (translationLanguage === oldLanguageCodes[i]) {
-                                    transUnits[j]['target'] = comment;
-                                }
-                            }
+                if (
+                    note['$']?.['from'] === 'Developer' &&
+                    typeof note['_'] === 'string'
+                ) {
+                    const translations = note['_']
+                        .split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/);
+
+                    for (const translation of translations) {
+                        const [langRaw, valueRaw] = translation.split('=');
+                        if (!langRaw || !valueRaw) continue;
+
+                        const lang = langRaw
+                            .replace('%', '')
+                            .trim()
+                            .toUpperCase();
+
+                        let value = valueRaw.trim().replace(/^"(.*)"$/, '$1');
+
+                        if (lang === currentOldLanguageCode) {
+                            transUnits[j]['target'] = value;
+                            hasLanguage = true;
+                            break; // 🔒 idioma encontrado
                         }
                     }
-                    else {
-                        //if not, remove the trans-unit
-                        transUnits.splice(j, 1);
-                        j--;
-                    }
                 }
+                if (hasLanguage) break;
+            }
+            // eliminar solo si NO existe traducción para este idioma
+            if (!hasLanguage) {
+                transUnits.splice(j, 1);
+                j--;
             }
         }
-        //Generating the new XLIFF file
-        let builder = new xml2js.Builder();
-        let xml = builder.buildObject(clonedResult);
-        //Writting the new file
-        fs.writeFile(`${PROJECT_PATH}\\Translations\\${appJSON.name}.${newLanguageCodes[i]}.g.xlf`, xml, 'utf8', onFileWritten);
-        console.log(`Created file: ${PROJECT_PATH}\\Translations\\${appJSON.name}.${newLanguageCodes[i]}.g.xlf`);
+        // Guardar archivo
+        const builder = new (require('xml2js')).Builder();
+        const xml = builder.buildObject(clonedResult);
+
+        const fs = require('fs');
+        const PROJECT_PATH = process.argv[2];
+        const appJSON = getAppJSON();
+
+        fs.writeFileSync(
+            `${PROJECT_PATH}\\Translations\\${appJSON.name}.${currentNewLanguageCode}.g.xlf`,
+            xml,
+            'utf8'
+        );
+
+        console.log(
+            `Created file: ${appJSON.name}.${currentNewLanguageCode}.g.xlf`
+        );
     }
 }
+
+
 /**
  * Event triggered when new XLIFF file is written
  * @param err Error data (if there is an error)
