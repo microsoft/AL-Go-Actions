@@ -62,7 +62,7 @@ function onStringParsed(err, result) {
     .filter(l => OLD_LANGUAGE_CODES.includes(l));
     newLanguageCodes = transformLanguageCodesOldToNew(oldLanguageCodes);
 
-    // 🔁 UN ARCHIVO POR IDIOMA
+    // UN ARCHIVO POR IDIOMA
     for (let fileIndex = 0; fileIndex < newLanguageCodes.length; fileIndex++) {
 
         const currentOldLanguageCode = oldLanguageCodes[fileIndex]
@@ -82,7 +82,7 @@ function onStringParsed(err, result) {
         let transUnits =
             clonedResult['xliff']['file'][0]['body'][0]['group'][0]['trans-unit'];
 
-        // 🔥 Limpiar targets antes de empezar
+        // Limpiar targets antes de empezar
         for (const unit of transUnits) {
             delete unit['target'];
         }
@@ -116,7 +116,7 @@ function onStringParsed(err, result) {
                         if (lang === currentOldLanguageCode) {
                             transUnits[j]['target'] = value;
                             hasLanguage = true;
-                            break; // 🔒 idioma encontrado
+                            break; // idioma encontrado
                         }
                     }
                 }
