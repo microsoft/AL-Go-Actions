@@ -7,8 +7,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const fs = require("fs");
 const xml2js = require("xml2js");
-const OLD_LANGUAGE_CODES = ["ESP", "SVE", "RUS", "NLD", "NLB", "NOR", "ITA", "ITS", "ISL", "FRA", "FRS", "FRC", "FRB", "FIN", "ESM", "ENU", "ENZ", "ENG", "ENC", "ENA", "DEU", "DES", "DEA", "DAN", "CSY"];
-const NEW_LANGUAGE_CODES = ["es-ES", "sv-SE", "ru-RU", "nl-NL", "nl-BE", "nb-NO", "it-IT", "it-CH", "is-IS", "fr-FR", "fr-CH", "fr-CA", "fr-BE", "fi-FI", "es-MX", "en-US", "en-NZ", "en-GB", "en-CA", "en-AU", "de-DE", "de-CH", "de-AT", "da-DK", "cs-CZ"];
+const OLD_LANGUAGE_CODES = ["ESP", "SVE", "RUS", "NLD", "NLB", "NOR", "ITA", "ITS", "ISL", "FRA", "FRS", "FRC", "FRB", "FIN", "ESM", "ENU", "ENZ", "ENG", "ENC", "ENA", "DEU", "DES", "DEA", "DAN", "CSY", "PTG"];
+const NEW_LANGUAGE_CODES = ["es-ES", "sv-SE", "ru-RU", "nl-NL", "nl-BE", "nb-NO", "it-IT", "it-CH", "is-IS", "fr-FR", "fr-CH", "fr-CA", "fr-BE", "fi-FI", "es-MX", "en-US", "en-NZ", "en-GB", "en-CA", "en-AU", "de-DE", "de-CH", "de-AT", "da-DK", "cs-CZ", "pt-PT"];
 const PROJECT_PATH = process.argv[2];
 let appJSON;
 let oldLanguageCodes = [];
