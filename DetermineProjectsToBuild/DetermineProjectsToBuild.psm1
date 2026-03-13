@@ -306,7 +306,9 @@ function IsFullBuildRequired {
         return $false
     }
 
-    $fullBuildPatterns += @(Join-Path '.github' '*.json')
+    if (-not $settings.incrementalBuilds.ignoreSettingsChanges) {
+        $fullBuildPatterns += @(Join-Path '.github' '*.json')
+    }
     if($settings.fullBuildPatterns) {
         $fullBuildPatterns += $settings.fullBuildPatterns
     }
