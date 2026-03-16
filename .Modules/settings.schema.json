@@ -468,10 +468,6 @@
                 },
                 "mode": {
                     "type": "string"
-                },
-                "ignoreSettingsChanges": {
-                    "type": "boolean",
-                    "description": "When true, changes to .github/*.json files will not force a full rebuild. Default is false."
                 }
             },
             "required": [
@@ -550,6 +546,10 @@
                 "type": "string"
             },
             "description": "An array of patterns to be used for triggering full builds. See https://aka.ms/ALGoSettings#fullbuildpatterns"
+        },
+        "ignoreSettingsChanges": {
+            "type": "boolean",
+            "description": "When true, changes to .github/*.json files will not force a full rebuild. Default is false."
         },
         "excludeEnvironments": {
             "type": "array",

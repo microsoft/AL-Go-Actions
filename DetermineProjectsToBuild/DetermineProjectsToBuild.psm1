@@ -306,11 +306,13 @@ function IsFullBuildRequired {
         return $false
     }
 
-    if (-not $settings.incrementalBuilds.ignoreSettingsChanges) {
-        $fullBuildPatterns += @(Join-Path '.github' '*.json')
-    }
+    $settingsPattern = Join-Path '.github' '*.json'
+    $fullBuildPatterns += @($settingsPattern)
     if($settings.fullBuildPatterns) {
         $fullBuildPatterns += $settings.fullBuildPatterns
+    }
+    if ($settings.ignoreSettingsChanges) {
+        $fullBuildPatterns = @($fullBuildPatterns | Where-Object { $_ -ne $settingsPattern })
     }
 
     #Include the base folder in the modified files
