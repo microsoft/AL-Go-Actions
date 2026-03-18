@@ -219,6 +219,7 @@ function GetDefaultSettings
         }
         "fullBuildPatterns"                             = @()
         "excludeEnvironments"                           = @()
+        "continuousDeployment"                          = $null
         "alDoc"                                         = [ordered]@{
             "continuousDeployment"                      = $false
             "deployToGitHubPages"                       = $true
